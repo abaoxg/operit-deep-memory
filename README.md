@@ -171,4 +171,24 @@ v1.1.3 · toolpkg_id: `com.operit.deep_memory`
 
 > 非法 `surface` 会让宿主在**包解析阶段**抛 `IllegalArgumentException`，整包失败、插件从列表消失，`try/catch` 兜不住。
 > 另外，`packages/` 目录里只要残留一个坏包，所有后续安装都会报同一个不相关的错误，排障前务必先清掉。
+
+## 工作区纪律（硬规则）
+
+内部存储根目录**只允许**保留既有的那几个自有文件与目录（本项目为 `dm_work2/`、`dm_out/`），其余为系统自带目录。任何中间产物、临时文件、抓包/抓界面输出都不得落在根目录。
+
+**所有临时文件一律写进工作区** `dm_work2/_t/`，用完即删：
+
+```bash
+mkdir -p /sdcard/dm_work2/_t
+# 好：中间文件进工作区
+uiautomator dump /sdcard/dm_work2/_t/ui.xml
+# 坏：直接写根目录（曾误留 ui.xml / ui2.xml）
+# uiautomator dump /sdcard/ui.xml
+```
+
+踩过的坑：`uiautomator dump`、`screencap`、`logcat -f`、`curl -o` 这类命令**必须给手机侧绝对路径**，习惯上一顺手就写成 `/sdcard/xxx`，事后又忘了清，根目录就会冒出文件。固定用 `_t/` 前缀可根除。
+
+另外两条同源纪律：
+- **不要一条命令塞海量输出**：`grep` 打二进制 dex、`logcat -d` 全量、递归 `grep -r` 大目录，都会让单次返回超出长度上限而被整轮丢弃。范围必须卡死（`| head -n`、指定文件、限定时间窗）。
+- **大文件不要拖进 sdcard**：需要读 APK/镜像等系统路径文件时，优先在原地用 root 权限读，确需拷贝的用完立即删，别留在 `/sdcard/Download/`。
 - v1.0.0：六边形基础能力（写入/检索/图谱/复习/统计/面板）
