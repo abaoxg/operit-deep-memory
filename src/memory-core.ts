@@ -47,6 +47,14 @@ export interface MemoryItem {
   links: string[];         // 关联记忆 id
   space: string;           // 记忆空间：general / 工作 / 生活 / 学习 ...
   chatId?: string;         // 单独记忆：仅该对话框可见；空=通用记忆（全局共享）
+  /**
+   * 角色归属（角色主线隔离）。
+   * - undefined / "" = 全局记忆，任何角色可见（默认）
+   * - 具体 id       = 仅该角色可见（角色私域记忆）
+   * 与 chatId 是两个独立维度：chatId 管"在哪个对话"，characterId 管"对谁而言"。
+   */
+  characterId?: string;
+  characterName?: string;  // 角色显示名快照（便于 UI 展示与角色删除后溯源）
   sensitive?: boolean;     // 敏感内容加密存储
   imagePath?: string;      // 关联图片（记忆目录内相对路径 images/<id>.ext），空=无图
   expiryAt?: number;       // 可选过期时间
@@ -99,6 +107,22 @@ export interface MemorySettings {
   /* 注入预算 */
   injectPinnedAlways: boolean;     // 置顶记忆常驻注入
   injectBudgetChars: number;       // 注入字符预算
+  /* ---- 角色主线隔离（v1.2.0 新增）---- */
+  characterIsolation: boolean;     // 启用角色隔离：按当前角色过滤注入与检索
+  injectGlobalMemory: boolean;     // 注入全局记忆（characterId 为空的，任何角色都可见）
+  injectCharacterMemory: boolean;  // 注入当前角色的私域记忆
+  characterAutoTag: boolean;       // 自动写入时把当前角色记到 characterId 上
+  characterFallbackGlobal: boolean;// 拿不到角色 id 时降级为全局可见（true）还是什么都不注入（false）
+  characterRegistry: CharacterEntry[]; // 角色注册表（id → 显示名，用于 UI 与历史记忆补名）
+}
+
+/** 角色注册表条目：记忆库里出现的角色快照 */
+export interface CharacterEntry {
+  id: string;
+  name: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  count: number;   // 该角色名下记忆条数（读取时实时计算，仅供展示）
 }
 
 export const DEFAULT_SETTINGS: MemorySettings = {
@@ -143,7 +167,14 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   aiExtractMaxItems: 3,
   // 注入预算：pinned 常驻 + 按重要性挑选，避免记忆变多后盖不全
   injectPinnedAlways: true,
-  injectBudgetChars: 1600
+  injectBudgetChars: 1600,
+  // ---- 角色主线隔离（v1.2.0 新增）----
+  characterIsolation: true,        // 默认开启：不同角色不串记忆
+  injectGlobalMemory: true,        // 全局记忆照常注入（你的偏好/习惯对所有角色通用）
+  injectCharacterMemory: true,     // 角色私域记忆也注入
+  characterAutoTag: true,          // 自动提取时记录当前角色
+  characterFallbackGlobal: true,   // 拿不到角色（普通对话）→ 按全局处理
+  characterRegistry: []
 };
 
 export interface MemoryStore {
@@ -552,6 +583,8 @@ export interface RecallQuery {
   allSpaces?: boolean; // true=忽略空间过滤
   chatId?: string;  // 不传=仅通用记忆；传=通用 + 该对话框单独记忆
   allChats?: boolean; // true=包含全部对话的单独记忆
+  characterId?: string; // 当前角色 id；不传=只看全局记忆
+  allCharacters?: boolean; // true=忽略角色隔离（管理面板/统计用）
 }
 
 function tokenize(text: string): string[] {
@@ -645,6 +678,8 @@ export function normalizeItem(raw: Record<string, any>): MemoryItem | null {
     space: typeof raw.space === "string" && raw.space ? raw.space : "general"
   };
   if (typeof raw.chatId === "string" && raw.chatId) item.chatId = raw.chatId;
+  if (typeof raw.characterId === "string" && raw.characterId) item.characterId = raw.characterId;
+  if (typeof raw.characterName === "string" && raw.characterName) item.characterName = raw.characterName;
   if (typeof raw.imagePath === "string" && raw.imagePath) item.imagePath = raw.imagePath;
   if (typeof raw.expiryAt === "number") item.expiryAt = raw.expiryAt;
   if (raw.pinned === true) item.pinned = true;
@@ -812,6 +847,8 @@ export interface RememberInput {
   space?: string;
   sensitive?: boolean;
   chatId?: string;         // 单独记忆：仅该对话框可见；空=通用记忆
+  characterId?: string;    // 角色归属：空=全局记忆（所有角色可见）
+  characterName?: string;  // 角色名快照
   imagePath?: string;      // 本地图片路径（复制进记忆库）
   mergeSimilar?: boolean; // 相似内容去重合并
 }
@@ -844,9 +881,12 @@ export async function remember(store: MemoryStore, input: RememberInput, setting
   }
 
   // 去重合并：内容高度相似时更新旧记忆（有冲突时不合并，保留旧记忆供确认）
+  // 角色隔离：只在同一角色域内合并 —— 否则角色A的话会被并进角色B的记忆，隔离从根上失效
   let merged = false;
   if (input.mergeSimilar !== false && conflicts.length === 0) {
+    const targetChar = String(input.characterId || "");
     for (const old of store.items) {
+      if (String(old.characterId || "") !== targetChar) continue;   // 跨角色绝不合并
       if (old.space === space && similarity(old.content, content) >= 0.6) {
         old.content = content;
         old.updatedAt = now;
@@ -885,6 +925,10 @@ export async function remember(store: MemoryStore, input: RememberInput, setting
     space
   };
   if (typeof input.chatId === "string" && input.chatId) item.chatId = input.chatId;
+  if (typeof input.characterId === "string" && input.characterId) {
+    item.characterId = input.characterId;
+    if (typeof input.characterName === "string" && input.characterName) item.characterName = input.characterName;
+  }
   // 图片记忆：复制图片进库并关联
   if (input.imagePath && detectImageExt(input.imagePath)) {
     const rel = await copyImageIntoLibrary(input.imagePath, item.id);
@@ -928,6 +972,79 @@ export function findRelated(store: MemoryStore, item: MemoryItem, settings: Memo
   return candidates.map((x) => x.m);
 }
 
+/* ---------------- 角色主线隔离 ---------------- */
+
+/**
+ * 角色可见性契约（唯一判定入口，注入/检索/统计全部必须走这里）：
+ *   - 未启用隔离          → 全部可见（向后兼容）
+ *   - 记忆无 characterId  → 全局记忆，是否可见取决于 injectGlobalMemory
+ *   - 记忆有 characterId  → 仅当与当前角色一致才可见，取决于 injectCharacterMemory
+ *   - 当前无角色          → 只能看到全局记忆
+ *
+ * 关键设计：所有路径共用这一个函数，杜绝"存的时候隔离了、查的时候漏了"。
+ */
+export function isVisibleToCharacter(item: MemoryItem, characterId: string | undefined, settings: MemorySettings): boolean {
+  if (!settings.characterIsolation) return true;
+  const cur = String(characterId || "");
+  const owner = String(item.characterId || "");
+  if (!owner) return settings.injectGlobalMemory !== false;
+  if (!cur) return false;                       // 无角色身份：看不到任何角色私域记忆
+  if (owner !== cur) return false;              // 别的角色：一律不可见
+  return settings.injectCharacterMemory !== false;
+}
+
+/** 从会话上下文里解析当前角色（宿主 event 结构层层兜底，任何一层命中即用） */
+export function resolveCharacterId(evt: any): { id: string; name: string } {
+  const paths: any[] = [
+    evt && evt.metadata && evt.metadata.activePrompt,
+    evt && evt.eventPayload && evt.eventPayload.metadata && evt.eventPayload.metadata.activePrompt,
+    evt && evt.eventPayload && evt.eventPayload.activePrompt,
+    evt && evt.activePrompt,
+  ];
+  for (const p of paths) {
+    if (!p || typeof p !== "object") continue;
+    const type = String(p.type || "").toLowerCase();
+    const id = p.id || p.cardId || p.characterId;
+    if (!id) continue;
+    // 只认角色卡类型；其它 prompt 类型（如普通 system）不算角色
+    if (type && type !== "character_card" && type !== "character" && type !== "persona") continue;
+    return { id: String(id), name: String(p.name || p.displayName || p.title || "") };
+  }
+  return { id: "", name: "" };
+}
+
+/** 维护角色注册表：记录出现过的角色，便于 UI 分组与历史记忆补名 */
+export function touchCharacterRegistry(settings: MemorySettings, id: string, name: string): boolean {
+  if (!id) return false;
+  if (!Array.isArray(settings.characterRegistry)) settings.characterRegistry = [];
+  const now = Date.now();
+  const hit = settings.characterRegistry.find((c) => c.id === id);
+  if (hit) {
+    let changed = false;
+    if (name && hit.name !== name) { hit.name = name; changed = true; }
+    if (now - hit.lastSeenAt > 60000) { hit.lastSeenAt = now; changed = true; }
+    return changed;
+  }
+  settings.characterRegistry.push({ id, name: name || "未命名角色", firstSeenAt: now, lastSeenAt: now, count: 0 });
+  return true;
+}
+
+/** 统计每个角色名下记忆条数（纯计算，不落盘） */
+export function characterStats(store: MemoryStore, settings: MemorySettings): { id: string; name: string; count: number }[] {
+  const map = new Map<string, { id: string; name: string; count: number }>();
+  store.items.forEach((m) => {
+    if (!m.characterId) return;
+    const cur = map.get(m.characterId) || {
+      id: m.characterId,
+      name: m.characterName || (settings.characterRegistry || []).find((c) => c.id === m.characterId)?.name || "未知角色",
+      count: 0,
+    };
+    cur.count += 1;
+    map.set(m.characterId, cur);
+  });
+  return Array.from(map.values()).sort((a, b) => b.count - a.count);
+}
+
 /** 执行检索（含过滤 + 打分 + 排序 + 访问记录 + 空间过滤 + 可选语义重排） */
 export async function recall(store: MemoryStore, q: RecallQuery, settings: MemorySettings): Promise<{ items: MemoryItem[]; total: number; touched: boolean }> {
   const now = Date.now();
@@ -939,6 +1056,8 @@ export async function recall(store: MemoryStore, q: RecallQuery, settings: Memor
 
   let filtered = store.items.filter((m) => {
     if (space && m.space !== space) return false;
+    // 角色主流隔离：唯一判定入口（characterId 缺省=全局可见）
+    if (!q.allCharacters && !isVisibleToCharacter(m, q.characterId, settings)) return false;
     // 对话归属过滤：默认仅通用记忆；传 chatId 则含该对话单独记忆；allChats 含全部
     if (q.allChats !== true) {
       if (q.chatId) {
@@ -1126,11 +1245,12 @@ export async function saveInjectionCache(hash: string, text: string): Promise<vo
 }
 
 /** 注入缓存 hash：记忆库版本 + 关键设置 + 当前对话 → 文本不变则缓存命中 */
-export function injectionCacheHash(store: MemoryStore, settings: MemorySettings, chatId?: string): string {
+export function injectionCacheHash(store: MemoryStore, settings: MemorySettings, chatId?: string, characterId?: string): string {
   const parts = [
     String(store.updatedAt),
     String(store.items.length),
     String(chatId || ""),
+    String(characterId || ""),   // 角色必须进 hash，否则切角色会命中上一角色的缓存
     settings.activeSpace,
     String(settings.injectCount),
     String(settings.injectIncludeDue),
@@ -1140,19 +1260,28 @@ export function injectionCacheHash(store: MemoryStore, settings: MemorySettings,
     String(settings.injectGeneral),
     String(settings.injectSpace),
     String(settings.birthdayRemind),
-    String(settings.reviewEnabled)
+    String(settings.reviewEnabled),
+    String(settings.characterIsolation),
+    String(settings.injectGlobalMemory),
+    String(settings.injectCharacterMemory)
   ];
   return parts.join("|");
 }
 
-export function buildInjection(store: MemoryStore, settings: MemorySettings, maxChars: number = 1200, chatId?: string): string {
+export function buildInjection(store: MemoryStore, settings: MemorySettings, maxChars: number = 1200, chatId?: string, characterId?: string): string {
   if (!settings.autoInject || store.items.length === 0) return "";
   const now = Date.now();
-  // 注入范围：通用记忆（chatId 为空，全局共享）∪ 单独记忆（chatId == 当前对话框）
-  const scopeItems = store.items.filter((m) =>
-    (settings.injectGeneral !== false && !m.chatId) ||
-    (settings.injectSpace !== false && chatId && m.chatId === chatId)
-  );
+  // 注入范围：三层过滤 —— 角色隔离 ∩ 对话归属 ∩ 空间
+  //   角色：isVisibleToCharacter 统一判定（全局记忆 or 当前角色私域）
+  //   对话：通用记忆（chatId 为空，全局共享）∪ 单独记忆（chatId == 当前对话框）
+  const curChar = String(characterId || "");
+  const scopeItems = store.items.filter((m) => {
+    if (!isVisibleToCharacter(m, curChar, settings)) return false;
+    return (
+      (settings.injectGeneral !== false && !m.chatId) ||
+      (settings.injectSpace !== false && chatId && m.chatId === chatId)
+    );
+  });
   const compact = settings.compactInject !== false;
   const contentMax = compact ? 80 : 120;
   const tagMax = compact ? 2 : 4;

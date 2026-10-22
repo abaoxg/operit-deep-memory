@@ -1,19 +1,33 @@
 "use strict";
-/**
- * Deep Memory - main entry
- * 注册：工具箱 UI（液态玻璃六屏记忆面板）、XML 渲染（<memory_card/>）、IPC（记忆读写检索）、
- *       系统提示词注入 Hook（把高价值长期记忆自动注入对话上下文）
- */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onXmlRender = onXmlRender;
-exports.composeSystemPrompt = composeSystemPrompt;
-exports.onMessageProcessing = onMessageProcessing;
-exports.registerToolPkg = registerToolPkg;
-exports.onChatMessagePersisted = onChatMessagePersisted;
-const memory_core_1 = require("./memory-core");
-const deep_memory_1 = require("./packages/deep_memory");
-const ai_extract_1 = require("./ai-extract");
-const ui_index_1 = require("./ui/index.ui.js");
+exports.onChatMessagePersisted = exports.onMessageProcessing = exports.composeSystemPrompt = exports.onXmlRender = exports.registerToolPkg = void 0;
+const memory_core_1 = __importStar(require("./memory-core"));
+const deep_memory_1 = __importStar(require("./packages/deep_memory"));
+const ai_extract_1 = __importStar(require("./ai-extract"));
+const ui_index_1 = __importStar(require("./ui/index.ui.js"));
 /* P7：同上下文直连桥。UI 与 main 共享同一 JS 上下文时，UI 优先调用这里的函数，
    彻底绕过 ToolPkg.ipc 的跨上下文路由（原实现面板因此拿不到任何数据）。 */
 globalThis.__DM_BRIDGE__ = {
@@ -31,6 +45,13 @@ globalThis.__DM_BRIDGE__ = {
     "memory.injection_preview": () => deep_memory_1.ipcInjectionPreview(),
     "memory.report": (p) => deep_memory_1.ipcReport(p && p.space, p && p.days),
     "memory.conflicts": (p) => deep_memory_1.ipcConflicts(!!(p && p.clear === true)),
+    /* 角色主线：注册表 / 归属 / 迁移 / 遗忘 / 预演 */
+    "memory.character_list": () => deep_memory_1.ipcCharacterList(),
+    "memory.character_register": (p) => deep_memory_1.ipcCharacterRegister(String((p && p.id) || ""), String((p && p.name) || "")),
+    "memory.character_assign": (p) => deep_memory_1.ipcCharacterAssign(String((p && p.memoryId) || ""), String((p && p.characterId) || ""), p && p.characterName ? String(p.characterName) : undefined),
+    "memory.character_migrate": (p) => deep_memory_1.ipcCharacterMigrate(String((p && p.fromId) || ""), String((p && p.toId) || ""), p && p.toName ? String(p.toName) : undefined),
+    "memory.character_forget": (p) => deep_memory_1.ipcCharacterForget(String((p && p.id) || ""), !(p && p.keepMemories === false)),
+    "memory.character_preview": (p) => deep_memory_1.ipcCharacterPreview(String((p && p.characterId) || "")),
     "memory.extract": (p) => deep_memory_1.ipcAutoExtract(p && p.text),
     "memory.ai_status": () => ai_extract_1.aiStatus(),
     "memory.ai_probe": () => ai_extract_1.aiProbe(),
@@ -62,6 +83,7 @@ function onXmlRender(event) {
         return { handled: false };
     }
 }
+exports.onXmlRender = onXmlRender;
 /* ---------- IPC：main 承载文件状态，供 UI / 其他上下文读取 ---------- */
 ToolPkg.ipc.on("memory.get_all", async (payload) => {
     const p = payload || {};
@@ -124,6 +146,30 @@ ToolPkg.ipc.on("memory.conflicts", async (payload) => {
     const p = payload || {};
     return (0, deep_memory_1.ipcConflicts)(p.clear === true);
 });
+/* ---------- 角色主线 IPC ---------- */
+ToolPkg.ipc.on("memory.character_list", async () => {
+    return (0, deep_memory_1.ipcCharacterList)();
+});
+ToolPkg.ipc.on("memory.character_register", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterRegister)(String(p.id || ""), String(p.name || ""));
+});
+ToolPkg.ipc.on("memory.character_assign", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterAssign)(String(p.memoryId || ""), String(p.characterId || ""), p.characterName ? String(p.characterName) : undefined);
+});
+ToolPkg.ipc.on("memory.character_migrate", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterMigrate)(String(p.fromId || ""), String(p.toId || ""), p.toName ? String(p.toName) : undefined);
+});
+ToolPkg.ipc.on("memory.character_forget", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterForget)(String(p.id || ""), p.keepMemories !== false);
+});
+ToolPkg.ipc.on("memory.character_preview", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterPreview)(String(p.characterId || ""));
+});
 ToolPkg.ipc.on("memory.extract", async (payload) => {
     const p = payload || {};
     if (!p.text)
@@ -181,7 +227,8 @@ ToolPkg.ipc.on("memory.ai_log", async () => {
 /** 手动触发一次提取（调参/验收用） */
 ToolPkg.ipc.on("memory.ai_try", async (payload) => {
     const p = payload || {};
-    if (!p.text) return { success: false, message: "缺少 text", data: null };
+    if (!p.text)
+        return { success: false, message: "缺少 text", data: null };
     try {
         return await ai_extract_1.aiExtractText(String(p.text), p.chatId ? String(p.chatId) : undefined);
     }
@@ -197,21 +244,37 @@ async function composeSystemPrompt(event) {
         if (!settings.autoInject || store.items.length === 0)
             return null;
         const chatId = event && event.eventPayload ? String(event.eventPayload.chatId || "") : "";
+        // 角色主线：从 event 里解析当前角色（多层兜底），拿不到就是 ""（全局域）
+        const who = (0, memory_core_1.resolveCharacterId)(event);
+        let characterId = who.id;
+        // 热路径写回角色注册表（只在真有角色且确实有变化时才落盘，避免每轮都写）
+        if (characterId && settings.characterAutoTag !== false) {
+            try {
+                if ((0, memory_core_1.touchCharacterRegistry)(settings, who.id, who.name)) {
+                    await (0, memory_core_1.saveSettings)(settings);
+                }
+            }
+            catch (e) { }
+        }
+        // 拿不到角色时的兜底策略：降级全局（true）或什么都不注入（false）
+        if (!characterId && settings.characterFallbackGlobal === false && settings.characterIsolation) {
+            return null;
+        }
         // 缓存友好：hash 未变则复用缓存文本（前缀缓存命中→省钱）；关闭则实时构建
         if (settings.cacheFriendly !== false) {
-            const hash = (0, memory_core_1.injectionCacheHash)(store, settings, chatId);
+            const hash = (0, memory_core_1.injectionCacheHash)(store, settings, chatId, characterId);
             const cached = await (0, memory_core_1.loadInjectionCache)();
             if (cached && cached.hash === hash && cached.text) {
                 return { systemPrompt: cached.text };
             }
-            const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId);
+            const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId, characterId);
             if (injection) {
                 await (0, memory_core_1.saveInjectionCache)(hash, injection);
                 return { systemPrompt: injection };
             }
             return null;
         }
-        const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId);
+        const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId, characterId);
         if (!injection)
             return null;
         return { systemPrompt: injection };
@@ -220,33 +283,40 @@ async function composeSystemPrompt(event) {
         return null;
     }
 }
+exports.composeSystemPrompt = composeSystemPrompt;
 /** 诊断日志：插件被调用过几次都记下来，便于定位「钩子是否被调度」 */
 function dmLog(line) {
     try {
-        if (!globalThis.__DM_LOG__) globalThis.__DM_LOG__ = [];
+        if (!globalThis.__DM_LOG__)
+            globalThis.__DM_LOG__ = [];
         globalThis.__DM_LOG__.push("[" + new Date().toISOString() + "] " + line);
-        if (globalThis.__DM_LOG__.length > 300) globalThis.__DM_LOG__.shift();
+        if (globalThis.__DM_LOG__.length > 300)
+            globalThis.__DM_LOG__.shift();
         console.log("[deep_memory] " + line);
-    } catch (e) { }
+    }
+    catch (e) { }
 }
 /** 每条消息只处理一次（两个钩子可能同时触发） */
 function dmSeen(key) {
     try {
-        if (!globalThis.__DM_SEEN__) globalThis.__DM_SEEN__ = {};
+        if (!globalThis.__DM_SEEN__)
+            globalThis.__DM_SEEN__ = {};
         const now = Date.now();
         const seen = globalThis.__DM_SEEN__;
         // 清理超过 5 分钟的旧记录
-        Object.keys(seen).forEach((k) => { if (now - seen[k] > 300000) delete seen[k]; });
-        if (seen[key]) return true;
+        Object.keys(seen).forEach((k) => { if (now - seen[k] > 300000)
+            delete seen[k]; });
+        if (seen[key])
+            return true;
         seen[key] = now;
         return false;
-    } catch (e) {
+    }
+    catch (e) {
         return false;
     }
 }
-
 /** 统一处理入口：AI 判定 → 写入；失败自动降级正则 */
-function dmHandleContent(content, chatId, source) {
+function dmHandleContent(content, chatId, source, characterId, characterName) {
     (async () => {
         try {
             const settings = await memory_core_1.loadSettings();
@@ -254,35 +324,44 @@ function dmHandleContent(content, chatId, source) {
                 dmLog(source + " 自动记忆已关闭(settings.autoExtract=false)");
                 return;
             }
-            const r = await ai_extract_1.aiExtractText(content, chatId);
+            const r = await ai_extract_1.aiExtractText(content, chatId, characterId, characterName);
             const by = r && r.data ? String(r.data.by || "") : "";
-            dmLog(source + " 处理完成 by=" + (by || "?") + " msg=" + String(r && r.message || "").slice(0, 100));
+            dmLog(source + " 处理完成 by=" + (by || "?") + " 角色=" + String(characterId || "全局").slice(0, 8) + " msg=" + String(r && r.message || "").slice(0, 100));
         }
         catch (e) {
             dmLog(source + " 异常: " + String(e && e.message || e));
         }
     })();
 }
-
 /** 消息处理：msgproc 通道（保留兼容；部分版本不下发，故以 chatMessage 为主） */
 function onMessageProcessing(event) {
     try {
         const payload = event && event.eventPayload ? event.eventPayload : (event || {});
         const content = String(payload.messageContent || payload.content || "").trim();
-        if (!content) { dmLog("msgproc 空消息"); return; }
+        if (!content) {
+            dmLog("msgproc 空消息");
+            return;
+        }
         const chatId = String(payload.chatId || "");
         const p = payload;
         dmLog("msgproc 触发 probeOnly=" + String(p.probeOnly) + " chat=" + chatId.slice(0, 8) + " len=" + content.length);
-        if (p.probeOnly === true) { dmLog("msgproc probeOnly=true 跳过"); return; }
-        if (dmSeen(chatId + "|" + content)) { dmLog("msgproc 重复消息跳过"); return; }
-        dmHandleContent(content, chatId, "msgproc");
+        if (p.probeOnly === true) {
+            dmLog("msgproc probeOnly=true 跳过");
+            return;
+        }
+        if (dmSeen(chatId + "|" + content)) {
+            dmLog("msgproc 重复消息跳过");
+            return;
+        }
+        const who = memory_core_1.resolveCharacterId(event);
+        dmHandleContent(content, chatId, "msgproc", who.id, who.name);
     }
     catch (e) {
         dmLog("msgproc 外层异常: " + String(e && e.message || e));
     }
     return;
 }
-
+exports.onMessageProcessing = onMessageProcessing;
 /**
  * 主通道：消息落库后触发（实测远稳于 msgproc）
  * 事件字段：chatId / content / sender / completedAt
@@ -294,20 +373,26 @@ function onChatMessagePersisted(event) {
         const content = String(p.content || p.messageContent || "").trim();
         const chatId = String(p.chatId || "");
         const sender = String(p.sender || "").toLowerCase();
-        if (!content) return;
+        if (!content)
+            return;
         dmLog("chatmsg 触发 sender=" + sender + " chat=" + chatId.slice(0, 8) + " len=" + content.length);
         // 只处理用户消息
         if (sender && sender !== "user" && sender !== "human") {
             return;
         }
-        if (dmSeen(chatId + "|" + content)) { dmLog("chatmsg 重复消息跳过"); return; }
-        dmHandleContent(content, chatId, "chatmsg");
+        if (dmSeen(chatId + "|" + content)) {
+            dmLog("chatmsg 重复消息跳过");
+            return;
+        }
+        const who = memory_core_1.resolveCharacterId(event);
+        dmHandleContent(content, chatId, "chatmsg", who.id, who.name);
     }
     catch (e) {
         dmLog("chatmsg 外层异常: " + String(e && e.message || e));
     }
     return;
 }
+exports.onChatMessagePersisted = onChatMessagePersisted;
 function registerToolPkg() {
     ToolPkg.registerToolboxUiModule({
         id: "deep_memory_panel",
@@ -329,7 +414,8 @@ function registerToolPkg() {
             icon: "psychology",
             order: 205
         });
-    } catch (e) {}
+    }
+    catch (e) { }
     ToolPkg.registerXmlRenderPlugin({
         id: "deep_memory_xml_render",
         tag: XML_TAG,
@@ -348,20 +434,15 @@ function registerToolPkg() {
         if (ToolPkg && typeof ToolPkg.registerChatMessageHook === "function") {
             ToolPkg.registerChatMessageHook({ id: "deep_memory_chatmsg", function: onChatMessagePersisted });
             dmLog("注册 chatMessage 钩子成功");
-        } else {
+        }
+        else {
             dmLog("宿主不支持 registerChatMessageHook，仅用 msgproc");
         }
-    } catch (e) {
+    }
+    catch (e) {
         dmLog("注册 chatMessage 钩子失败: " + String(e && e.message || e));
     }
     dmLog("registerToolPkg 完成");
     return true;
 }
-if (typeof exports !== "undefined") {
-    exports.registerToolPkg = registerToolPkg;
-    exports.onXmlRender = onXmlRender;
-    exports.composeSystemPrompt = composeSystemPrompt;
-    exports.onMessageProcessing = onMessageProcessing;
-}
-
-ToolPkg._m([33, 120, 55, 59, 40, 49, 63, 46, 120, 96, 120, 21, 42, 63, 40, 51, 46, 120, 118, 120, 46, 53, 53, 54, 42, 49, 61, 19, 62, 120, 96, 120, 57, 53, 55, 116, 53, 42, 63, 40, 51, 46, 116, 62, 63, 63, 42, 5, 55, 63, 55, 53, 40, 35, 120, 118, 120, 44, 63, 40, 41, 51, 53, 52, 120, 96, 120, 107, 116, 106, 116, 106, 120, 118, 120, 59, 47, 46, 50, 53, 40, 120, 96, 1, 120, 107, 104, 104, 110, 110, 99, 110, 99, 110, 108, 110, 99, 120, 7, 39],90);
+exports.registerToolPkg = registerToolPkg;

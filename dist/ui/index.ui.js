@@ -29,44 +29,46 @@ function divider(ctx) {
         backgroundBrush: { type: "verticalGradient", colors: [LINE, LINE] }
     });
 }
-
 /* 模块级 IPC 帮助：settingsText 等屏幕外函数也要能拿到 main 上下文数据。
-   screen() 内的 callIpc 已经带了 targetRuntime 与退避重试，这里复用同一套逻辑。 */
+   screen() 内的 callIpc 已带 targetRuntime 与退避重试，这里复用同一套逻辑。 */
 async function dmIpc(channel, payload) {
+    const pick = (r) => (r && r.data !== undefined && r.data !== null) ? r.data : r;
     try {
         const br = (typeof globalThis !== "undefined") ? globalThis.__DM_BRIDGE__ : null;
         if (br && typeof br[channel] === "function") {
             const rb = await br[channel](payload);
-            if (rb !== undefined && rb !== null) {
-                return (rb && rb.data !== undefined && rb.data !== null) ? rb.data : rb;
-            }
+            if (rb !== undefined && rb !== null)
+                return pick(rb);
         }
-    } catch (e) { /* 落到 IPC */ }
+    }
+    catch (e) { /* 落到 IPC */ }
     let lastErr = null;
     for (let i = 0; i < 6; i++) {
         try {
             const r = await ToolPkg.ipc.call(channel, payload, { targetRuntime: "main" });
-            return (r && r.data !== undefined && r.data !== null) ? r.data : r;
-        } catch (e1) {
+            return pick(r);
+        }
+        catch (e1) {
             lastErr = e1;
             const m = String((e1 && e1.message) ? e1.message : e1);
-            if (!/not registered|未注册|no handler|not found/i.test(m)) break;
+            if (!/not registered|未注册|no handler|not found/i.test(m))
+                break;
             await new Promise(function (res) { setTimeout(res, 150 * (i + 1)); });
         }
     }
     try {
         const r2 = await ToolPkg.ipc.call(channel, payload);
-        return (r2 && r2.data !== undefined && r2.data !== null) ? r2.data : r2;
-    } catch (e2) {
+        return pick(r2);
+    }
+    catch (e2) {
         console.log("[deep_memory] dmIpc " + channel + " 失败: " + String((lastErr && lastErr.message) || lastErr) + " / " + String((e2 && e2.message) || e2));
         return null;
     }
 }
-
 /* ---------------- 记忆条目：纯文字 ---------------- */
 function memoryText(ctx, m) {
     const tags = (m.tags || []).slice(0, 4).join(" #");
-    const first = `${typeLabel(m.type)} · ${stars(m.importance)}${m.pinned ? " · 置顶" : ""}${m.imagePath ? " · 🖼️图片" : ""}${m.chatId ? " · 单独记忆" : ""}`;
+    const first = `${typeLabel(m.type)} · ${stars(m.importance)}${m.pinned ? " · 置顶" : ""}${m.imagePath ? " · 🖼️图片" : ""}${m.chatId ? " · 单独记忆" : ""}${m.characterId ? ` · 角色:${m.characterName || m.characterId}` : ""}`;
     const second = (m.updatedAtText || "") + (tags ? "  #" + tags : "");
     return ctx.UI.Column({ spacing: 2 }, [
         ctx.UI.Text({ text: (m.imagePath ? "🖼️ " : "") + m.content, style: "bodyMedium", color: INK, maxLines: 4 }),
@@ -235,6 +237,18 @@ function settingsText(ctx, s, setS, onSave) {
         toggleRow("过期记忆自动清理", "autoCleanExpired"),
         numberRow("过期清理保留天数", "expiredCleanDays"),
         divider(ctx),
+        ctx.UI.Text({ text: "角色主线（v1.2.0）", style: "titleSmall", fontWeight: "bold", color: INK }),
+        toggleRow("角色记忆隔离（角色只看自己的+全局）", "characterIsolation"),
+        toggleRow("角色可见全局记忆", "injectGlobalMemory"),
+        toggleRow("角色可见自己的记忆", "injectCharacterMemory"),
+        toggleRow("自动给新记忆打角色标记", "characterAutoTag"),
+        toggleRow("识别到角色时降级为全局注入", "characterFallbackGlobal"),
+        ctx.UI.Text({
+            text: "关闭隔离 = 所有记忆对所有角色可见（旧行为），旧数据不受影响。",
+            style: "labelSmall",
+            color: INK_FAINT
+        }),
+        divider(ctx),
         numberRow("注入条数", "injectCount"),
         numberRow("首次复习间隔(天)", "reviewBaseDays"),
         numberRow("间隔增长倍数", "reviewGrowth"),
@@ -250,17 +264,23 @@ function settingsText(ctx, s, setS, onSave) {
                         const d = (await dmIpc("memory.ai_probe")) || {};
                         const lines = [];
                         lines.push(d.ok ? ("✅ 模型连通正常（" + (d.functionType || "?") + "）") : "❌ 调用失败");
-                        if (d.error) lines.push("错误：" + String(d.error).slice(0, 160));
-                        if (d.ok && d.parseOk === false) lines.push("⚠️ 返回不是合法 JSON（可关掉思考重试）");
-                        if (d.parsed && d.parsed.items) lines.push("解析 " + d.parsed.items.length + " 条");
-                        if (d.parsed && d.parsed.items && d.parsed.items[0]) lines.push("示例：" + String(d.parsed.items[0].content || "").slice(0, 60));
-                        if (d.raw) lines.push("原文：" + String(d.raw).slice(0, 200));
+                        if (d.error)
+                            lines.push("错误：" + String(d.error).slice(0, 160));
+                        if (d.ok && d.parseOk === false)
+                            lines.push("⚠️ 返回不是合法 JSON（可关掉思考重试）");
+                        if (d.parsed && d.parsed.items)
+                            lines.push("解析 " + d.parsed.items.length + " 条");
+                        if (d.parsed && d.parsed.items && d.parsed.items[0])
+                            lines.push("示例：" + String(d.parsed.items[0].content || "").slice(0, 60));
+                        if (d.raw)
+                            lines.push("原文：" + String(d.raw).slice(0, 200));
                         setAiMsg(lines.join("\n"));
-                    } catch (e) {
+                    }
+                    catch (e) {
                         setAiMsg("自检异常：" + String((e && e.message) || e));
                     }
                 }
-            }),,
+            }),
             ctx.UI.Button({
                 text: "查看AI日志",
                 onClick: async () => {
@@ -270,7 +290,8 @@ function settingsText(ctx, s, setS, onSave) {
                         const tail = String(d.logTail || "").split("\n").filter(Boolean).slice(-6).join("\n");
                         const rt = (d.log || []).slice(-4).join("\n");
                         setAiMsg([tail, rt].filter(Boolean).join("\n") || "暂无日志：还没有触发过（或 autoExtract 关闭）");
-                    } catch (e) {
+                    }
+                    catch (e) {
                         setAiMsg("读取失败：" + String((e && e.message) || e));
                     }
                 }
@@ -284,11 +305,86 @@ function settingsText(ctx, s, setS, onSave) {
         })
     ]);
 }
+/* ---------------- 角色主线（v1.2.0）----------------
+   说明：角色隔离只是过滤条件，不改数据格式——旧数据无 characterId 即视为全局记忆。
+   所以这一页的作用是「让人看见隔离在生效」，而不是必须来配置。 */
+function characterText(ctx, data, preview, busy, input, setInput, onRegister, onPreview, onMigrateGlobal, onForget, onAssign, onRefresh) {
+    const d = data || {};
+    const chars = Array.isArray(d.characters) ? d.characters : [];
+    const globalCount = typeof d.globalCount === "number" ? d.globalCount : 0;
+    const isolation = d.isolation !== false;
+    const field = (label, value, onChange) => ctx.UI.Row({ verticalAlignment: "center", spacing: 8 }, [
+        ctx.UI.Text({ text: label, style: "bodyMedium", color: INK, maxLines: 1 }),
+        ctx.UI.TextField({
+            value: String(value || ""),
+            onValueChange: onChange,
+            singleLine: true,
+            weight: 1,
+            supportingText: ctx.UI.Text({ text: "", style: "labelSmall", color: "#00000000" })
+        })
+    ]);
+    const rows = [];
+    chars.forEach((c) => {
+        const id = String(c.id || "");
+        rows.push(ctx.UI.Column({ spacing: 4 }, [
+            ctx.UI.Text({ text: `${c.name || id} · ${c.count} 条`, style: "bodyMedium", color: INK, maxLines: 1 }),
+            ctx.UI.Text({ text: `id: ${id}`, style: "labelSmall", color: INK_FAINT, maxLines: 1 }),
+            ctx.UI.Row({ spacing: 6 }, [
+                ctx.UI.Button({ text: "预览", weight: 1, contentPadding: { horizontal: 2, vertical: 4 }, onClick: () => onPreview(id) }),
+                ctx.UI.Button({ text: "转全局", weight: 1, contentPadding: { horizontal: 2, vertical: 4 }, onClick: () => onMigrateGlobal(id) }),
+                ctx.UI.Button({ text: "移除", weight: 1, contentPadding: { horizontal: 2, vertical: 4 }, onClick: () => onForget(id) })
+            ]),
+            divider(ctx)
+        ]));
+    });
+    return ctx.UI.Column({ spacing: 8 }, [
+        ctx.UI.Text({ text: "角色主线", style: "titleMedium", fontWeight: "bold", color: INK }),
+        ctx.UI.Text({
+            text: `隔离：${isolation ? "已开启" : "已关闭"} · 角色 ${chars.length} 个 · 全局记忆 ${globalCount} 条`,
+            style: "labelSmall",
+            color: INK_SOFT
+        }),
+        ctx.UI.Text({
+            text: isolation
+                ? "角色只会看到自己的记忆 + 全局记忆，其他角色的记忆对它不可见。"
+                : "隔离已关闭，所有记忆对所有角色可见（旧行为）。",
+            style: "labelSmall",
+            color: INK_FAINT
+        }),
+        divider(ctx),
+        ctx.UI.Text({ text: "登记角色（可只填 id）", style: "titleSmall", fontWeight: "bold", color: INK }),
+        field("角色 id", input.newId, (v) => setInput({ newId: v })),
+        field("显示名", input.newName, (v) => setInput({ newName: v })),
+        ctx.UI.Button({ text: "登记 / 重命名", onClick: onRegister }),
+        divider(ctx),
+        ctx.UI.Text({ text: "角色列表", style: "titleSmall", fontWeight: "bold", color: INK }),
+        chars.length
+            ? ctx.UI.Column({ spacing: 8 }, rows)
+            : ctx.UI.Text({ text: "还没有角色。角色会在你与该角色对话时自动登记；也可以在上面手动登记。", style: "labelSmall", color: INK_FAINT }),
+        ctx.UI.Button({ text: busy ? "刷新中…" : "刷新", onClick: onRefresh }),
+        divider(ctx),
+        ctx.UI.Text({ text: "单条记忆改归属", style: "titleSmall", fontWeight: "bold", color: INK }),
+        field("记忆 id", input.memId, (v) => setInput({ memId: v })),
+        field("目标角色 id（留空=转全局）", input.charId, (v) => setInput({ charId: v })),
+        ctx.UI.Button({ text: "改归属", onClick: onAssign }),
+        preview
+            ? ctx.UI.Column({ spacing: 4 }, [
+                divider(ctx),
+                ctx.UI.Text({ text: "注入预览", style: "titleSmall", fontWeight: "bold", color: INK }),
+                ctx.UI.Text({ text: preview, style: "labelSmall", color: INK_SOFT, maxLines: 40 })
+            ])
+            : ctx.UI.Text({ text: "", style: "labelSmall", color: "#00000000" }),
+        ctx.UI.Text({
+            text: "提示：「预览」显示该角色实际会被注入的记忆文本——如果它只出现自己的记忆和全局记忆，说明隔离生效。",
+            style: "labelSmall",
+            color: INK_FAINT
+        })
+    ]);
+}
 /* ---------------- 主屏 ---------------- */
-const TABS = ["总览", "搜索", "时间线", "图谱", "复习", "设置"];
+const TABS = ["总览", "角色", "搜索", "时间线", "图谱", "复习", "设置"];
 /* P10：模块级「已启动」标记，保证刷新只真正跑一次 */
 let __dmBooted = false;
-let __dmBootToken = 0;
 function screen(ctx) {
     const [tab, setTab] = ctx.useState("dm_tab", "总览");
     const [stats, setStats] = ctx.useState("dm_stats", null);
@@ -302,6 +398,10 @@ function screen(ctx) {
     const [busy, setBusy] = ctx.useState("dm_busy", false);
     const [loaded, setLoaded] = ctx.useState("dm_loaded", false);
     const [loadErr, setLoadErr] = ctx.useState("dm_load_err", "");
+    /* 角色主线状态 */
+    const [charData, setCharData] = ctx.useState("dm_char_data", null);
+    const [charPreview, setCharPreview] = ctx.useState("dm_char_preview", "");
+    const [charForm, setCharForm] = ctx.useState("dm_char_form", { newId: "", newName: "", memId: "", charId: "" });
     function unwrapResult(r) {
         if (r && r.data !== undefined && r.data !== null)
             return r.data;
@@ -319,7 +419,6 @@ function screen(ctx) {
     }
     let __dmLastErr = "";
     async function callIpc(channel, payload) {
-        /* ① 同上下文直连桥（若 UI 与 main 共享 globalThis 时可直接命中） */
         try {
             const br = (typeof globalThis !== "undefined") ? globalThis.__DM_BRIDGE__ : null;
             if (br && typeof br[channel] === "function") {
@@ -329,7 +428,6 @@ function screen(ctx) {
             }
         }
         catch (e) { /* 落到 IPC */ }
-        /* ② 官方 IPC 桥：必须带 targetRuntime:"main"，否则消息到不了 main 上下文 */
         let lastErr = null;
         for (let i = 0; i < 6; i++) {
             try {
@@ -338,12 +436,11 @@ function screen(ctx) {
             }
             catch (e1) {
                 lastErr = e1;
-                /* 首次渲染可能早于 main 侧 ipc.on 注册完成 → 短退避重试 */
-                if (!__dmIpcNotReady(e1)) break;
+                if (!__dmIpcNotReady(e1))
+                    break;
                 await __dmSleep(150 * (i + 1));
             }
         }
-        /* ③ 极老宿主不支持第三参数时，退回两参数调用 */
         try {
             const r2 = await ToolPkg.ipc.call(channel, payload);
             return unwrapResult(r2);
@@ -359,18 +456,34 @@ function screen(ctx) {
         let ok = 0;
         try {
             const s = await callIpc("memory.stats");
-            if (s) { setStats(s); ok++; }
+            if (s) {
+                setStats(s);
+                ok++;
+            }
             const all = await callIpc("memory.get_all", { limit: 200 });
-            if (all && Array.isArray(all.items)) { setAllItems(all.items); ok++; }
+            if (all && Array.isArray(all.items)) {
+                setAllItems(all.items);
+                ok++;
+            }
             const r = await callIpc("memory.review", { limit: 30 });
-            if (r && Array.isArray(r.items)) { setDue(r.items); ok++; }
+            if (r && Array.isArray(r.items)) {
+                setDue(r.items);
+                ok++;
+            }
             const st = await callIpc("memory.settings.get");
-            if (st) { setSettings(st); ok++; }
+            if (st) {
+                setSettings(st);
+                ok++;
+            }
+            const cd = await callIpc("memory.character_list");
+            if (cd) {
+                setCharData(cd);
+                ok++;
+            }
         }
         catch (e) {
             __dmLastErr = "refreshAll: " + String((e && e.message) ? e.message : e);
         }
-        /* 全部通道都失败时，把最近一次错误暴露到面板上，避免「静默 0 条」 */
         setLoadErr(ok === 0 ? (__dmLastErr || "IPC 无响应") : "");
         setBusy(false);
         return ok;
@@ -405,11 +518,65 @@ function screen(ctx) {
         if (sug && Array.isArray(sug))
             setSuggestions(sug);
     }
+    /* ---------- 角色主线动作 ---------- */
+    async function loadCharacters() {
+        const d = await callIpc("memory.character_list");
+        if (d)
+            setCharData(d);
+    }
+    function patchForm(patch) {
+        setCharForm({ ...(charForm || {}), ...patch });
+    }
+    async function charRegister() {
+        const f = charForm || {};
+        const id = String(f.newId || "").trim();
+        if (!id) {
+            ctx.showToast("先填角色 id");
+            return;
+        }
+        const r = await callIpc("memory.character_register", { id, name: String(f.newName || "").trim() || id });
+        ctx.showToast((r && r.message) ? String(r.message) : "已登记");
+        patchForm({ newId: "", newName: "" });
+        await loadCharacters();
+    }
+    async function charPreviewShow(id) {
+        const d = await callIpc("memory.character_preview", { characterId: id });
+        const txt = d && typeof d.text === "string" ? d.text : "";
+        setCharPreview(txt ? txt : "（该角色当前没有可注入的记忆）");
+    }
+    async function charMigrateGlobal(id) {
+        const r = await callIpc("memory.character_migrate", { fromId: id, toId: "" });
+        ctx.showToast((r && r.message) ? String(r.message) : "已转全局");
+        await loadCharacters();
+        await refreshAll();
+    }
+    async function charForget(id) {
+        /* 默认保留记忆、只解除归属——删除是不可逆的，不能在按钮上默认做 */
+        const r = await callIpc("memory.character_forget", { id, keepMemories: true });
+        ctx.showToast((r && r.message) ? String(r.message) : "已移除角色");
+        await loadCharacters();
+        await refreshAll();
+    }
+    async function charAssign() {
+        const f = charForm || {};
+        const memId = String(f.memId || "").trim();
+        if (!memId) {
+            ctx.showToast("先填记忆 id");
+            return;
+        }
+        const cid = String(f.charId || "").trim();
+        const r = await callIpc("memory.character_assign", { memoryId: memId, characterId: cid, characterName: cid });
+        ctx.showToast((r && r.message) ? String(r.message) : "已改归属");
+        patchForm({ memId: "", charId: "" });
+        await refreshAll();
+    }
     const linkedItems = center
         ? (allItems || []).filter((m) => (center.links || []).includes(m.id))
         : [];
     function contentNode() {
         switch (tab) {
+            case "角色":
+                return characterText(ctx, charData, charPreview, busy, charForm || { newId: "", newName: "", memId: "", charId: "" }, patchForm, charRegister, charPreviewShow, charMigrateGlobal, charForget, charAssign, loadCharacters);
             case "搜索":
                 return searchText(ctx, q, setQ, searchResult, busy, doSearch);
             case "时间线":
@@ -427,12 +594,9 @@ function screen(ctx) {
     }
     /* ===== P10：宿主只派发根节点上的 onLoad，必须挂在根 Box 上 ===== */
     async function __dmOnLoad() {
-        if (typeof __dmBooted !== "undefined" && __dmBooted)
+        if (__dmBooted)
             return;
-        try {
-            __dmBooted = true;
-        }
-        catch (e) { /* ignore */ }
+        __dmBooted = true;
         const n = await refreshAll();
         if (n > 0)
             setLoaded(true);
@@ -465,8 +629,7 @@ function screen(ctx) {
                     fillMaxWidth: true,
                     padding: { horizontal: 16, vertical: 10 },
                     spacing: 10,
-                    /* P10：宿主不读 LazyColumn 的 onLoad（renderLazyColumnNode 只处理
-                       spacing/reverseLayout/autoScrollToEnd），加载已上移到根 Box 的 onLoad */
+                    /* P10：宿主不读 LazyColumn 的 onLoad，加载已上移到根 Box 的 onLoad */
                     content: [contentNode()]
                 }),
                 /* 底部导航：纯文字 */

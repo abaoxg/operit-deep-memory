@@ -1,31 +1,23 @@
 "use strict";
 /**
- * Deep Memory · AI 提取引擎（dist 版）
+ * Deep Memory · AI 提取引擎
  *
  * 通过宿主模型接口 Tools.Chat.call 让当前对话模型判断
  * 「这条消息里有没有值得长期记住的东西」，替代原先 16 条固定正则。
  *
  * 设计要点：
  *  1. 零外部依赖：不需要 API Key，用宿主已配置的模型（functionType=MEMORY，失败降级 CHAT）
- *  2. 语义判定：AI 输出严格 JSON，含 shouldRemember / type / importance / sensitive / space
+ *  2. 语义判定：AI 输出严格 JSON，含 remember / items / type / importance / sensitive / space
  *  3. 三层兜底：AI 不可用 → 正则（原逻辑）→ 不写入
  *  4. 成本护栏：最小长度、每小时次数上限、单次最多 3 条、去重合并（复用 remember 的相似合并）
  *  5. 可观测：状态写入 ai_state.json，面板可查最后一次调用结果与错误
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.aiStatus = aiStatus;
-exports.aiResetState = aiResetState;
-exports.aiExtractMessage = aiExtractMessage;
-exports.aiExtractText = aiExtractText;
-exports.aiProbe = aiProbe;
-
-const core = require("./memory-core");
-const { DATA_DIR, TYPE_MAP } = core;
-
-const AI_STATE_FILE = `${DATA_DIR}/ai_state.json`;
-const AI_LOG_FILE = `${DATA_DIR}/ai_extract.log`;
+exports.aiProbe = exports.aiResetState = exports.aiStatus = exports.aiExtractText = exports.aiExtractMessage = void 0;
+const memory_core_1 = require("./memory-core");
+const AI_STATE_FILE = `${memory_core_1.DATA_DIR}/ai_state.json`;
+const AI_LOG_FILE = `${memory_core_1.DATA_DIR}/ai_extract.log`;
 const MAX_LOG_LINES = 200;
-
 const DEFAULTS = {
     aiExtract: true,
     aiExtractType: "MEMORY",
@@ -36,104 +28,96 @@ const DEFAULTS = {
     aiExtractThinking: false,
     aiExtractRecordUsage: false
 };
-
 /* ---------------- 小工具 ---------------- */
-
 function nowMs() { return Date.now(); }
 function hourKey(ts) {
     const d = new Date(ts || nowMs());
     return `${d.getFullYear()}${d.getMonth() + 1}${d.getDate()}${d.getHours()}`;
 }
-function str(v) { return v === undefined || v === null ? "" : String(v); }
-
+function str(v) {
+    return v === undefined || v === null ? "" : String(v);
+}
 async function readJson(path, fallback) {
     try {
-        const r = await Tools.Files.read(path);
-        if (r && r.content) return JSON.parse(r.content);
-        if (typeof r === "string" && r) return JSON.parse(r);
-    } catch (e) { /* not exists */ }
+        const r = await globalThis.Tools.Files.read(path);
+        const c = r && r.content ? r.content : (typeof r === "string" ? r : "");
+        if (c)
+            return JSON.parse(c);
+    }
+    catch (e) { /* not exists */ }
     return fallback;
 }
 async function writeJson(path, obj) {
     try {
-        await Tools.Files.write(path, JSON.stringify(obj), false);
+        await globalThis.Tools.Files.write(path, JSON.stringify(obj), false);
         return true;
-    } catch (e) {
+    }
+    catch (e) {
         return false;
     }
 }
-
-/** 读取运行状态 */
-async function loadState() {
-    const s = await readJson(AI_STATE_FILE, null);
-    return s && typeof s === "object" ? s : {
-        hourKey: "",
-        callCount: 0,
-        totalCalls: 0,
-        totalRemembered: 0,
-        totalSkipped: 0,
-        totalErrors: 0,
-        lastAt: 0,
-        lastError: "",
-        lastOutcome: "",
-        lastItems: [],
-        activeFunctionType: ""
+function emptyState() {
+    return {
+        hourKey: "", callCount: 0, totalCalls: 0, totalRemembered: 0,
+        totalSkipped: 0, totalErrors: 0, lastAt: 0, lastError: "",
+        lastOutcome: "", lastItems: [], activeFunctionType: ""
     };
 }
-
+async function loadState() {
+    const s = await readJson(AI_STATE_FILE, null);
+    return s && typeof s === "object" ? s : emptyState();
+}
 async function saveState(st) {
     await writeJson(AI_STATE_FILE, st);
 }
-
-/** 追加一行日志（保留最近 200 行） */
 async function appendLog(line) {
     try {
         let old = "";
         try {
-            const r = await Tools.Files.read(AI_LOG_FILE);
-            if (r && r.content) old = r.content;
-            else if (typeof r === "string") old = r;
-        } catch (e) { old = ""; }
+            const r = await globalThis.Tools.Files.read(AI_LOG_FILE);
+            old = r && r.content ? r.content : (typeof r === "string" ? r : "");
+        }
+        catch (e) {
+            old = "";
+        }
         const rows = old ? old.split("\n").filter(Boolean) : [];
         rows.push(`[${new Date().toLocaleString()}] ${line}`);
-        const trimmed = rows.slice(-MAX_LOG_LINES).join("\n");
-        await Tools.Files.write(AI_LOG_FILE, trimmed, false);
-    } catch (e) { /* ignore */ }
+        await globalThis.Tools.Files.write(AI_LOG_FILE, rows.slice(-MAX_LOG_LINES).join("\n"), false);
+    }
+    catch (e) { /* ignore */ }
 }
-
 /* ---------------- 宿主模型调用 ---------------- */
-
 function chatApi() {
     try {
-        const g = typeof globalThis !== "undefined" ? globalThis : null;
-        const T = g && g.Tools ? g.Tools : (typeof Tools !== "undefined" ? Tools : null);
-        if (T && T.Chat && typeof T.Chat.call === "function") return T.Chat;
-    } catch (e) { }
+        const g = globalThis;
+        const T = g && g.Tools ? g.Tools : null;
+        if (T && T.Chat && typeof T.Chat.call === "function")
+            return T.Chat;
+    }
+    catch (e) { }
     return null;
 }
-
-/** 调用宿主模型；turns 为 PromptTurn 数组 */
 async function callModel(functionType, turns, opts) {
     const chat = chatApi();
-    if (!chat) throw new Error("Tools.Chat.call 不可用");
+    if (!chat)
+        throw new Error("Tools.Chat.call 不可用");
     const o = opts || {};
-    const payload = {
-        functionType: String(functionType || "CHAT"),
-        turns: turns
-    };
-    if (o.recordTokenUsage !== undefined) payload.recordTokenUsage = !!o.recordTokenUsage;
-    if (o.enableThinking !== undefined) payload.enableThinking = !!o.enableThinking;
+    const payload = { functionType: String(functionType || "CHAT"), turns };
+    if (o.recordTokenUsage !== undefined)
+        payload.recordTokenUsage = !!o.recordTokenUsage;
+    if (o.enableThinking !== undefined)
+        payload.enableThinking = !!o.enableThinking;
     const res = await chat.call(payload);
-    if (!res) throw new Error("模型返回空");
+    if (!res)
+        throw new Error("模型返回空");
     const text = str(res.text).trim();
     if (!text) {
-        if (str(res.finishReason) === "tool_call") throw new Error("模型返回 tool_call 而非文本");
+        if (str(res.finishReason) === "tool_call")
+            throw new Error("模型返回 tool_call 而非文本");
         throw new Error("模型返回空文本");
     }
-    return { text: text, finishReason: str(res.finishReason) };
+    return { text, finishReason: str(res.finishReason) };
 }
-
-/** 依次尝试主 functionType 与降级 functionType */
 async function callModelCascade(turns, settings) {
     const primary = str(settings.aiExtractType || DEFAULTS.aiExtractType).trim() || "MEMORY";
     const fallback = str(settings.aiExtractFallbackType || DEFAULTS.aiExtractFallbackType).trim() || "CHAT";
@@ -144,21 +128,21 @@ async function callModelCascade(turns, settings) {
     const tried = [];
     let lastErr = null;
     for (const ft of [primary, fallback]) {
-        if (!ft || tried.indexOf(ft) >= 0) continue;
+        if (!ft || tried.indexOf(ft) >= 0)
+            continue;
         tried.push(ft);
         try {
             const r = await callModel(ft, turns, opts);
             return { ok: true, text: r.text, functionType: ft };
-        } catch (e) {
+        }
+        catch (e) {
             lastErr = e;
             await appendLog(`调用失败 functionType=${ft}: ${str(e && e.message || e)}`);
         }
     }
-    return { ok: false, error: str(lastErr && lastErr.message || lastErr || "未知错误"), tried: tried };
+    return { ok: false, error: str(lastErr && lastErr.message || lastErr || "未知错误"), tried };
 }
-
 /* ---------------- 提示词 ---------------- */
-
 const SYSTEM_PROMPT = [
     "你是「长期记忆提取器」。判断用户这条消息里有没有值得长期记住的信息，只输出一个 JSON，不要任何解释、不要 markdown 代码块。",
     "",
@@ -194,236 +178,261 @@ const SYSTEM_PROMPT = [
     "【遗忘请求】若用户要求删除/忘掉某条记忆，输出：",
     '{"remember":false,"items":[],"forget":{"keyword":"要删除的关键词"}}'
 ].join("\n");
-
 function buildTurns(text) {
     return [
         { kind: "SYSTEM", content: SYSTEM_PROMPT },
         { kind: "USER", content: text }
     ];
 }
-
 /* ---------------- 解析 ---------------- */
-
-/** 宽松解析：剥掉代码块、截取第一个平衡的 {...} */
 function parseJsonLoose(raw) {
     let t = str(raw).trim();
-    if (!t) return null;
+    if (!t)
+        return null;
     t = t.replace(/^```[a-zA-Z]*\s*/g, "").replace(/```\s*$/g, "").trim();
-    const tryParse = (s) => { try { return JSON.parse(s); } catch (e) { return null; } };
-    let v = tryParse(t);
-    if (v) return v;
+    const tryParse = (s) => { try {
+        return JSON.parse(s);
+    }
+    catch (e) {
+        return null;
+    } };
+    const v = tryParse(t);
+    if (v)
+        return v;
     const start = t.indexOf("{");
-    if (start < 0) return null;
+    if (start < 0)
+        return null;
     let depth = 0, inStr = false, esc = false, end = -1;
     for (let i = start; i < t.length; i++) {
         const c = t[i];
         if (inStr) {
-            if (esc) { esc = false; continue; }
-            if (c === "\\") { esc = true; continue; }
-            if (c === '"') inStr = false;
+            if (esc) {
+                esc = false;
+                continue;
+            }
+            if (c === "\\") {
+                esc = true;
+                continue;
+            }
+            if (c === '"')
+                inStr = false;
             continue;
         }
-        if (c === '"') { inStr = true; continue; }
-        if (c === "{") depth++;
-        else if (c === "}") { depth--; if (depth === 0) { end = i; break; } }
+        if (c === '"') {
+            inStr = true;
+            continue;
+        }
+        if (c === "{")
+            depth++;
+        else if (c === "}") {
+            depth--;
+            if (depth === 0) {
+                end = i;
+                break;
+            }
+        }
     }
-    if (end < 0) return null;
+    if (end < 0)
+        return null;
     return tryParse(t.slice(start, end + 1));
 }
-
 const VALID_TYPES = ["fact", "preference", "event", "relation", "idea", "task"];
 const VALID_SPACES = ["general", "工作", "生活", "学习"];
-
 function clampImp(v, dflt) {
     const n = Number(v);
-    if (!isFinite(n)) return dflt;
+    if (!isFinite(n))
+        return dflt;
     return Math.max(1, Math.min(5, Math.round(n)));
 }
-
 function normalizeItem(raw, settings) {
-    if (!raw || typeof raw !== "object") return null;
+    if (!raw || typeof raw !== "object")
+        return null;
     let content = str(raw.content).replace(/\s+/g, " ").trim();
-    if (content.length < 4) return null;
-    if (content.length > 200) content = content.slice(0, 200);
+    if (content.length < 4)
+        return null;
+    if (content.length > 200)
+        content = content.slice(0, 200);
     let type = str(raw.type).toLowerCase().trim();
-    if (VALID_TYPES.indexOf(type) < 0) type = "fact";
+    if (VALID_TYPES.indexOf(type) < 0)
+        type = "fact";
     const space = VALID_SPACES.indexOf(str(raw.space).trim()) >= 0 ? str(raw.space).trim() : "general";
-    const sensitive = raw.sensitive === true || /(地址|住址|手机号|电话|号码|微信号|微信|qq|邮箱|email|身份证|证件号|卡号|密码|账号|银行卡)/i.test(content);
+    const sensitive = raw.sensitive === true ||
+        /(地址|住址|手机号|电话|号码|微信号|微信|qq|邮箱|email|身份证|证件号|卡号|密码|账号|银行卡)/i.test(content);
     return {
-        content: content,
-        type: type,
+        content,
+        type,
         importance: clampImp(raw.importance, settings && settings.defaultImportance ? settings.defaultImportance : 3),
-        sensitive: sensitive,
-        space: space
+        sensitive,
+        space
     };
 }
-
 /* ---------------- 主流程 ---------------- */
-
-/** 快速跳过：明显不值得调用模型的内容 */
 function shouldSkipByRule(text, settings) {
     const t = str(text).trim();
     const minLen = Math.max(2, Number(settings.aiExtractMinLen) || DEFAULTS.aiExtractMinLen);
-    if (!t) return "空消息";
-    if (t.length < minLen && !/记住|忘了/.test(t)) return "太短";
-    if (/^[\s\p{P}\p{S}]+$/u.test(t)) return "纯符号";
-    if (/^(好|好的|嗯|哦|行|可以|收到|继续|ok|okay|谢谢|多谢|你好|在吗|1|2|3)[。！!.~]*$/i.test(t)) return "寒暄确认";
-    if (/^```/.test(t)) return "代码块";
-    if (t.length > 4000) return "过长";
+    if (!t)
+        return "空消息";
+    if (t.length < minLen && !/记住|忘了/.test(t))
+        return "太短";
+    if (/^[\s\p{P}\p{S}]+$/u.test(t))
+        return "纯符号";
+    if (/^(好|好的|嗯|哦|行|可以|收到|继续|ok|okay|谢谢|多谢|你好|在吗|1|2|3)[。！!.~]*$/i.test(t))
+        return "寒暄确认";
+    if (/^```/.test(t))
+        return "代码块";
+    if (t.length > 4000)
+        return "过长";
     return "";
 }
-
-/** 记录一次调用结果 */
 async function bumpState(st, patch) {
     Object.keys(patch || {}).forEach((k) => { st[k] = patch[k]; });
     st.lastAt = nowMs();
     await saveState(st);
 }
-
-/**
- * AI 判定单条消息
- * @returns {Promise<{skipped?:string, aiUsed:boolean, functionType?:string, remembered:any[], parseOk?:boolean, error?:string, raw?:string}>}
- */
-async function aiExtractMessage(text, chatId, settings) {
-    const s = settings || await core.loadSettings();
+async function aiExtractMessage(text, chatId, settings, characterId, characterName) {
+    const s = settings || await (0, memory_core_1.loadSettings)();
     const out = { aiUsed: false, remembered: [] };
-
-    if (s.aiExtract === false) { out.skipped = "AI 提取已关闭"; return out; }
+    if (s.aiExtract === false) {
+        out.skipped = "AI 提取已关闭";
+        return out;
+    }
     const skip = shouldSkipByRule(text, s);
-    if (skip) { out.skipped = skip; return out; }
-
+    if (skip) {
+        out.skipped = skip;
+        return out;
+    }
     const st = await loadState();
     const hk = hourKey();
-    if (st.hourKey !== hk) { st.hourKey = hk; st.callCount = 0; }
+    if (st.hourKey !== hk) {
+        st.hourKey = hk;
+        st.callCount = 0;
+    }
     const cap = Math.max(1, Number(s.aiExtractMaxPerHour) || DEFAULTS.aiExtractMaxPerHour);
     if (st.callCount >= cap) {
         out.skipped = `已达每小时上限 ${cap} 次`;
         return out;
     }
-
     const t = str(text).slice(0, 4000);
     st.callCount = (st.callCount || 0) + 1;
     st.totalCalls = (st.totalCalls || 0) + 1;
-
     const res = await callModelCascade(buildTurns(t), s);
     out.aiUsed = true;
     if (!res.ok) {
         out.error = res.error;
         st.totalErrors = (st.totalErrors || 0) + 1;
-        st.lastError = res.error;
+        st.lastError = res.error || "";
         st.lastOutcome = "AI 调用失败";
-        await bumpState(st, {});
+        await bumpState(st);
         await appendLog(`AI 失败，降级正则：${res.error}`);
         return out;
     }
     out.functionType = res.functionType;
-    st.activeFunctionType = res.functionType;
+    st.activeFunctionType = res.functionType || "";
     out.raw = res.text;
-
-    const parsed = parseJsonLoose(res.text);
+    const parsed = parseJsonLoose(res.text || "");
     if (!parsed || typeof parsed !== "object") {
         out.parseOk = false;
         st.totalErrors = (st.totalErrors || 0) + 1;
         st.lastError = "返回内容不是合法 JSON";
         st.lastOutcome = "解析失败，降级正则";
-        await bumpState(st, {});
-        await appendLog(`解析失败：${res.text.slice(0, 120)}`);
+        await bumpState(st);
+        await appendLog(`解析失败：${(res.text || "").slice(0, 120)}`);
         return out;
     }
     out.parseOk = true;
     st.lastError = "";
     out.skipped = "";
-
-    // 遗忘请求
     if (parsed.forget && str(parsed.forget.keyword).trim() && s.quickForget !== false) {
         out.forget = str(parsed.forget.keyword).trim();
         st.lastOutcome = `遗忘：${out.forget}`;
-        await bumpState(st, {});
+        await bumpState(st);
         return out;
     }
-
     if (parsed.remember !== true) {
         st.totalSkipped = (st.totalSkipped || 0) + 1;
         st.lastOutcome = "AI 判定：无需记忆";
         st.lastItems = [];
-        await bumpState(st, {});
+        await bumpState(st);
         return out;
     }
-
     const maxItems = Math.max(1, Number(s.aiExtractMaxItems) || DEFAULTS.aiExtractMaxItems);
-    const items = (Array.isArray(parsed.items) ? parsed.items : []).slice(0, maxItems)
-        .map((x) => normalizeItem(x, s)).filter(Boolean);
+    const items = (Array.isArray(parsed.items) ? parsed.items : [])
+        .slice(0, maxItems)
+        .map((x) => normalizeItem(x, s))
+        .filter(Boolean);
     if (!items.length) {
         st.totalSkipped = (st.totalSkipped || 0) + 1;
         st.lastOutcome = "AI 判定：无需记忆（条目无效）";
-        await bumpState(st, {});
+        await bumpState(st);
         return out;
     }
-
-    // 写库
-    const store = await core.loadStore();
+    const store = await (0, memory_core_1.loadStore)();
     const targetChatId = s.autoExtractChat === true && chatId ? chatId : undefined;
+    // 角色归属：开启自动打角色且当前确实有角色时，记忆落到该角色名下
+    const targetCharId = s.characterAutoTag !== false && characterId ? characterId : undefined;
     const brief = [];
     for (const it of items) {
         try {
-            const r = await core.remember(store, {
+            const r = await (0, memory_core_1.remember)(store, {
                 content: it.content,
                 type: it.type,
                 importance: it.importance,
                 source: "ai",
                 sensitive: it.sensitive,
                 space: it.space,
-                chatId: targetChatId
+                chatId: targetChatId,
+                characterId: targetCharId,
+                characterName: targetCharId ? characterName : undefined
             }, s);
             if (r.conflicts && r.conflicts.length) {
                 store.conflicts = (store.conflicts || []).concat(r.conflicts).slice(-10);
             }
-            out.remembered.push({ id: r.item.id, content: r.item.content, type: r.item.type, merged: r.merged, importance: r.item.importance });
+            out.remembered.push({
+                id: r.item.id, content: r.item.content, type: r.item.type,
+                merged: r.merged, importance: r.item.importance
+            });
             brief.push(`${r.merged ? "更新" : "新增"}「${r.item.content.slice(0, 30)}」`);
-        } catch (e) {
+        }
+        catch (e) {
             await appendLog(`写入失败：${str(e && e.message || e)}`);
         }
     }
     if (out.remembered.length) {
-        await core.saveStore(store);
+        await (0, memory_core_1.saveStore)(store);
         st.totalRemembered = (st.totalRemembered || 0) + out.remembered.length;
         st.lastOutcome = `记忆 ${out.remembered.length} 条`;
         st.lastItems = out.remembered.slice(0, 5);
         await appendLog(`AI(${res.functionType}) 命中：${brief.join("；")}`);
-    } else {
+    }
+    else {
         st.totalSkipped = (st.totalSkipped || 0) + 1;
         st.lastOutcome = "写入全部失败";
     }
-    await bumpState(st, {});
+    await bumpState(st);
     return out;
 }
-
-/**
- * 兼容旧入口：先 AI 判定，失败/关闭时降级到正则（extractMemoryIntent）
- * 返回结构与 ipcAutoExtract 的 ToolResult 接近，便于替换。
- */
-async function aiExtractText(text, chatId) {
-    const s = await core.loadSettings();
+exports.aiExtractMessage = aiExtractMessage;
+/** 先 AI 判定，失败/关闭时降级正则；返回 ToolResult 结构 */
+async function aiExtractText(text, chatId, characterId, characterName) {
+    const s = await (0, memory_core_1.loadSettings)();
     let res = null;
     try {
-        res = await aiExtractMessage(text, chatId, s);
-    } catch (e) {
+        res = await aiExtractMessage(text, chatId, s, characterId, characterName);
+    }
+    catch (e) {
         res = { aiUsed: false, remembered: [], error: str(e && e.message || e) };
     }
-
-    // AI 明确判定：无需记忆
     if (res && res.aiUsed && res.parseOk && !res.remembered.length && !res.forget) {
         return { success: true, message: "AI 判定无需记忆", data: { matched: false, by: "ai" } };
     }
-    // AI 执行遗忘
     if (res && res.forget) {
-        const fr = await require("./packages/deep_memory").dm_forget({ keyword: res.forget });
+        const dm = require("./packages/deep_memory");
+        const fr = await dm.dm_forget({ keyword: res.forget });
         return { success: true, message: `AI 遗忘「${res.forget}」→ ${fr.message}`, data: { matched: true, kind: "forget", by: "ai" } };
     }
-    // AI 成功写入
     if (res && res.remembered.length) {
         const first = res.remembered[0];
-        const ti = TYPE_MAP[first.type] || TYPE_MAP["fact"];
+        const ti = memory_core_1.TYPE_MAP[first.type] || memory_core_1.TYPE_MAP["fact"];
         const head = res.remembered.length > 1 ? `AI 记住 ${res.remembered.length} 条：` : "AI 已记忆：";
         return {
             success: true,
@@ -431,48 +440,50 @@ async function aiExtractText(text, chatId) {
             data: { matched: true, by: "ai", items: res.remembered, functionType: res.functionType || "" }
         };
     }
-    // 降级：原正则
-    const intent = core.extractMemoryIntent(text);
-    if (!intent) {
+    const intent = (0, memory_core_1.extractMemoryIntent)(text);
+    if (!intent)
         return { success: true, message: "未命中（AI 与正则均无）", data: { matched: false, by: "regex" } };
-    }
     if (intent.kind === "forget") {
-        const fr = await require("./packages/deep_memory").dm_forget({ keyword: intent.content });
+        const dm = require("./packages/deep_memory");
+        const fr = await dm.dm_forget({ keyword: intent.content });
         return { success: true, message: `已执行快捷遗忘：「${intent.content}」→ ${fr.message}`, data: { matched: true, kind: "forget", by: "regex" } };
     }
-    const store = await core.loadStore();
+    const store = await (0, memory_core_1.loadStore)();
     const targetChatId = s.autoExtractChat === true && chatId ? chatId : undefined;
-    const r = await core.remember(store, {
+    const targetCharId = s.characterAutoTag !== false && characterId ? characterId : undefined;
+    const r = await (0, memory_core_1.remember)(store, {
         content: intent.content,
         type: intent.type,
         importance: intent.importance,
         source: "auto",
         sensitive: intent.sensitive,
-        chatId: targetChatId
+        chatId: targetChatId,
+        characterId: targetCharId,
+        characterName: targetCharId ? characterName : undefined
     }, s);
     if (r.conflicts && r.conflicts.length) {
         store.conflicts = (store.conflicts || []).concat(r.conflicts).slice(-10);
     }
-    await core.saveStore(store);
-    const ti = TYPE_MAP[r.item.type] || TYPE_MAP["fact"];
+    await (0, memory_core_1.saveStore)(store);
+    const ti = memory_core_1.TYPE_MAP[r.item.type] || memory_core_1.TYPE_MAP["fact"];
     return {
         success: true,
         message: `已自动记忆（正则兜底）：${ti.emoji}${ti.labelZh}「${r.item.content.slice(0, 60)}」`,
         data: { matched: true, by: "regex", id: r.item.id }
     };
 }
-
-/** 探针：返回当前 AI 能力状态，供面板/诊断使用 */
+exports.aiExtractText = aiExtractText;
 async function aiStatus() {
-    const s = await core.loadSettings();
+    const s = await (0, memory_core_1.loadSettings)();
     const st = await loadState();
     const chat = chatApi();
     let logTail = "";
     try {
-        const r = await Tools.Files.read(AI_LOG_FILE);
+        const r = await globalThis.Tools.Files.read(AI_LOG_FILE);
         const c = r && r.content ? r.content : (typeof r === "string" ? r : "");
         logTail = c.split("\n").filter(Boolean).slice(-8).join("\n");
-    } catch (e) { }
+    }
+    catch (e) { }
     return {
         available: !!chat,
         enabled: s.aiExtract !== false,
@@ -489,35 +500,33 @@ async function aiStatus() {
         lastError: st.lastError || "",
         lastOutcome: st.lastOutcome || "",
         lastItems: st.lastItems || [],
-        logTail: logTail,
+        logTail,
         minLen: Number(s.aiExtractMinLen) || DEFAULTS.aiExtractMinLen,
         maxItems: Number(s.aiExtractMaxItems) || DEFAULTS.aiExtractMaxItems,
         settings: s
     };
 }
-
-/** 重置统计（不动记忆数据） */
+exports.aiStatus = aiStatus;
 async function aiResetState() {
-    await saveState({
-        hourKey: hourKey(), callCount: 0, totalCalls: 0, totalRemembered: 0,
-        totalSkipped: 0, totalErrors: 0, lastAt: 0, lastError: "", lastOutcome: "",
-        lastItems: [], activeFunctionType: ""
-    });
+    const st = emptyState();
+    st.hourKey = hourKey();
+    await saveState(st);
     return { success: true };
 }
-
-/** 连通性自检：发一句固定测试文本，看模型是否真能返回 JSON */
+exports.aiResetState = aiResetState;
 async function aiProbe() {
-    const s = await core.loadSettings();
+    const s = await (0, memory_core_1.loadSettings)();
     const testText = "记住：我的测试暗号是 7788，我是做网络运维的。";
     const res = await callModelCascade(buildTurns(testText), s);
-    if (!res.ok) return { ok: false, error: res.error, tried: res.tried };
-    const parsed = parseJsonLoose(res.text);
+    if (!res.ok)
+        return { ok: false, error: res.error, tried: res.tried };
+    const parsed = parseJsonLoose(res.text || "");
     return {
         ok: true,
         functionType: res.functionType,
-        raw: res.text.slice(0, 600),
+        raw: (res.text || "").slice(0, 600),
         parseOk: !!parsed,
         parsed: parsed || null
     };
 }
+exports.aiProbe = aiProbe;

@@ -303,7 +303,7 @@ async function bumpState(st: AiState, patch?: Record<string, any>): Promise<void
   await saveState(st);
 }
 
-export async function aiExtractMessage(text: string, chatId?: string, settings?: any): Promise<AiExtractResult> {
+export async function aiExtractMessage(text: string, chatId?: string, settings?: any, characterId?: string, characterName?: string): Promise<AiExtractResult> {
   const s = settings || await loadSettings();
   const out: AiExtractResult = { aiUsed: false, remembered: [] };
 
@@ -379,6 +379,8 @@ export async function aiExtractMessage(text: string, chatId?: string, settings?:
 
   const store = await loadStore();
   const targetChatId = s.autoExtractChat === true && chatId ? chatId : undefined;
+  // 角色归属：开启自动打角色且当前确实有角色时，记忆落到该角色名下
+  const targetCharId = s.characterAutoTag !== false && characterId ? characterId : undefined;
   const brief: string[] = [];
   for (const it of items) {
     try {
@@ -389,7 +391,9 @@ export async function aiExtractMessage(text: string, chatId?: string, settings?:
         source: "ai",
         sensitive: it.sensitive,
         space: it.space,
-        chatId: targetChatId
+        chatId: targetChatId,
+        characterId: targetCharId,
+        characterName: targetCharId ? characterName : undefined
       } as any, s);
       if (r.conflicts && r.conflicts.length) {
         store.conflicts = (store.conflicts || []).concat(r.conflicts).slice(-10);
@@ -418,11 +422,11 @@ export async function aiExtractMessage(text: string, chatId?: string, settings?:
 }
 
 /** 先 AI 判定，失败/关闭时降级正则；返回 ToolResult 结构 */
-export async function aiExtractText(text: string, chatId?: string): Promise<any> {
+export async function aiExtractText(text: string, chatId?: string, characterId?: string, characterName?: string): Promise<any> {
   const s = await loadSettings();
   let res: AiExtractResult | null = null;
   try {
-    res = await aiExtractMessage(text, chatId, s);
+    res = await aiExtractMessage(text, chatId, s, characterId, characterName);
   } catch (e: any) {
     res = { aiUsed: false, remembered: [], error: str(e && e.message || e) };
   }
@@ -455,13 +459,16 @@ export async function aiExtractText(text: string, chatId?: string): Promise<any>
   }
   const store = await loadStore();
   const targetChatId = s.autoExtractChat === true && chatId ? chatId : undefined;
+  const targetCharId = s.characterAutoTag !== false && characterId ? characterId : undefined;
   const r = await remember(store, {
     content: intent.content,
     type: intent.type,
     importance: intent.importance,
     source: "auto",
     sensitive: intent.sensitive,
-    chatId: targetChatId
+    chatId: targetChatId,
+    characterId: targetCharId,
+    characterName: targetCharId ? characterName : undefined
   } as any, s);
   if (r.conflicts && r.conflicts.length) {
     store.conflicts = (store.conflicts || []).concat(r.conflicts).slice(-10);

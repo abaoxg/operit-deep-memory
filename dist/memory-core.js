@@ -5,52 +5,8 @@
  * 纯逻辑 + Tools.Files IO，可被 main / sandbox 工具 / UI 共用。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_SETTINGS = exports.TYPE_MAP = exports.MEMORY_TYPES = exports.DEFAULT_IMPORTANCE = exports.MAX_LINKS_PER_MEMORY = exports.MAX_MEMORIES = exports.EXPORT_DIR = exports.IMAGES_DIR = exports.SETTINGS_FILE = exports.MEMORY_FILE = exports.DATA_DIR = exports.PLUGIN_ID = void 0;
-exports.formatTime = formatTime;
-exports.genId = genId;
-exports.encryptText = encryptText;
-exports.decryptText = decryptText;
-exports.extractMemoryIntent = extractMemoryIntent;
-exports.conflictDetect = conflictDetect;
-exports.buildReport = buildReport;
-exports.embedTexts = embedTexts;
-exports.rerankByEmbedding = rerankByEmbedding;
-exports.clampImportance = clampImportance;
-exports.normalizeType = normalizeType;
-exports.extractTags = extractTags;
-exports.computeNextReview = computeNextReview;
-exports.healthScore = healthScore;
-exports.isReviewDue = isReviewDue;
-exports.scoreRelevance = scoreRelevance;
-exports.sortItems = sortItems;
-exports.touchItems = touchItems;
-exports.normalizeItem = normalizeItem;
-exports.normalizeStore = normalizeStore;
-exports.encryptStoreItems = encryptStoreItems;
-exports.decryptStoreItems = decryptStoreItems;
-exports.loadStore = loadStore;
-exports.saveStore = saveStore;
-exports.loadSettings = loadSettings;
-exports.saveSettings = saveSettings;
-exports.findById = findById;
-exports.remember = remember;
-exports.findRelated = findRelated;
-exports.recall = recall;
-exports.buildStats = buildStats;
-exports.reviewQueue = reviewQueue;
-exports.completeReview = completeReview;
-exports.extractAnnualDate = extractAnnualDate;
-exports.loadInjectionCache = loadInjectionCache;
-exports.saveInjectionCache = saveInjectionCache;
-exports.injectionCacheHash = injectionCacheHash;
-exports.buildInjection = buildInjection;
-exports.detectImageExt = detectImageExt;
-exports.copyImageIntoLibrary = copyImageIntoLibrary;
-exports.copyImageForExport = copyImageForExport;
-exports.exportBundle = exportBundle;
-exports.importBundle = importBundle;
-exports.exportJson = exportJson;
-exports.importJson = importJson;
+exports.extractAnnualDate = exports.completeReview = exports.reviewQueue = exports.buildStats = exports.recall = exports.characterStats = exports.touchCharacterRegistry = exports.resolveCharacterId = exports.isVisibleToCharacter = exports.findRelated = exports.remember = exports.findById = exports.saveSettings = exports.loadSettings = exports.saveStore = exports.loadStore = exports.decryptStoreItems = exports.encryptStoreItems = exports.normalizeStore = exports.normalizeItem = exports.touchItems = exports.sortItems = exports.scoreRelevance = exports.isReviewDue = exports.healthScore = exports.computeNextReview = exports.extractTags = exports.normalizeType = exports.clampImportance = exports.rerankByEmbedding = exports.embedTexts = exports.buildReport = exports.conflictDetect = exports.extractMemoryIntent = exports.decryptText = exports.encryptText = exports.genId = exports.formatTime = exports.DEFAULT_SETTINGS = exports.TYPE_MAP = exports.MEMORY_TYPES = exports.DEFAULT_IMPORTANCE = exports.MAX_LINKS_PER_MEMORY = exports.MAX_MEMORIES = exports.EXPORT_DIR = exports.IMAGES_DIR = exports.SETTINGS_FILE = exports.MEMORY_FILE = exports.DATA_DIR = exports.PLUGIN_ID = void 0;
+exports.importJson = exports.exportJson = exports.importBundle = exports.exportBundle = exports.copyImageForExport = exports.copyImageIntoLibrary = exports.detectImageExt = exports.buildInjection = exports.injectionCacheHash = exports.saveInjectionCache = exports.loadInjectionCache = void 0;
 exports.PLUGIN_ID = "com.operit.deep_memory";
 exports.DATA_DIR = `/sdcard/Download/Operit/plugins/${exports.PLUGIN_ID}`;
 exports.MEMORY_FILE = `${exports.DATA_DIR}/memories.json`;
@@ -112,7 +68,14 @@ exports.DEFAULT_SETTINGS = {
     aiExtractMaxItems: 3,
     // 注入预算：pinned 常驻 + 按重要性挑选，避免记忆变多后盖不全
     injectPinnedAlways: true,
-    injectBudgetChars: 1600
+    injectBudgetChars: 1600,
+    // ---- 角色主线隔离（v1.2.0 新增）----
+    characterIsolation: true, // 默认开启：不同角色不串记忆
+    injectGlobalMemory: true, // 全局记忆照常注入（你的偏好/习惯对所有角色通用）
+    injectCharacterMemory: true, // 角色私域记忆也注入
+    characterAutoTag: true, // 自动提取时记录当前角色
+    characterFallbackGlobal: true, // 拿不到角色（普通对话）→ 按全局处理
+    characterRegistry: []
 };
 /* ---------------- 基础工具 ---------------- */
 function formatTime(ts) {
@@ -125,9 +88,11 @@ function formatTime(ts) {
         return "";
     }
 }
+exports.formatTime = formatTime;
 function genId() {
     return "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
+exports.genId = genId;
 /* ---------------- 敏感内容加密 ---------------- */
 /** 自实现 Base64（兼容 quickjs/node，无外部依赖） */
 const B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -200,6 +165,7 @@ function encryptText(plain, key) {
         return "XOR:" + xorCipher(plain, key).split("").map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
     }
 }
+exports.encryptText = encryptText;
 function decryptText(cipher, key) {
     if (!key || !cipher)
         return cipher;
@@ -231,6 +197,7 @@ function decryptText(cipher, key) {
     }
     return cipher;
 }
+exports.decryptText = decryptText;
 const EXTRACT_PATTERNS = [
     { re: /(?:请记住|记住|别忘了|记一下)[:：，,]?\s*(.+)/, type: "fact", importance: 4, sensitive: false },
     { re: /(?:我叫|我是|我的名字(?:是|叫))\s*(.+)/, type: "fact", importance: 5, sensitive: false },
@@ -273,6 +240,7 @@ function extractMemoryIntent(text) {
     }
     return null;
 }
+exports.extractMemoryIntent = extractMemoryIntent;
 /** 同主题关键值冲突检测：token 重叠度高但数字/日期等关键值不同 */
 function conflictDetect(store, content) {
     const out = [];
@@ -294,6 +262,7 @@ function conflictDetect(store, content) {
     }
     return out.slice(0, 5);
 }
+exports.conflictDetect = conflictDetect;
 /* ---------------- 记忆报告 ---------------- */
 function buildReport(store, settings, space, days) {
     const now = Date.now();
@@ -327,6 +296,7 @@ function buildReport(store, settings, space, days) {
     });
     return L.join("\n");
 }
+exports.buildReport = buildReport;
 /* ---------------- 语义检索（Embedding，可选） ---------------- */
 function cosine(a, b) {
     if (!a.length || a.length !== b.length)
@@ -361,6 +331,7 @@ async function embedTexts(texts, settings) {
     const list = (body && (body.data || (body.body && body.body.data))) || [];
     return list.map((item) => Array.isArray(item.embedding) ? item.embedding : []);
 }
+exports.embedTexts = embedTexts;
 /** 语义检索重排：对候选按 embedding 余弦相似度加分 */
 async function rerankByEmbedding(items, query, settings) {
     if (!settings.embedEnabled || !query || !items.length)
@@ -378,16 +349,19 @@ async function rerankByEmbedding(items, query, settings) {
         return items;
     }
 }
+exports.rerankByEmbedding = rerankByEmbedding;
 function clampImportance(v) {
     const n = parseInt(String(v), 10);
     if (isNaN(n))
         return exports.DEFAULT_IMPORTANCE;
     return Math.max(1, Math.min(5, n));
 }
+exports.clampImportance = clampImportance;
 function normalizeType(v) {
     const k = String(v || "").trim().toLowerCase();
     return (exports.TYPE_MAP[k] ? k : "fact");
 }
+exports.normalizeType = normalizeType;
 /* ---------------- 标签引擎 ---------------- */
 const STOP_WORDS = new Set([
     "一个", "这个", "那个", "什么", "怎么", "可以", "知道", "觉得", "喜欢", "我们", "你们", "他们", "自己",
@@ -425,7 +399,7 @@ function extractTags(content, existing = []) {
     words.forEach((w) => push(w));
     // 中文：按虚词切分成短语，只保留 2-8 字的名词性短语
     // （原实现按 2 字窗口暴力切分，会产出“庭路”“由器”“行脚”这类无意义碎片标签）
-    const CN_SPLIT = /[\u7684\u4e86\u662f\u548c\u4e0e\u53ca\u6216\u4f46\u800c\u5e76\u4e5f\u90fd\u5c31\u4e2a\u5427\u5417\u5462\u554a\u8fd9\u90a3\u6211\u4f60\u4ed6\u5979\u5b83\u4eec\u628a\u88ab\u8ba9\u4ece\u5411\u4e8e\u4e4b\u4e3a\u56e0\u6bcf\u7b2c\u66f4\u6700\u53c8\u518d]+/;
+    const CN_SPLIT = /[的了是和与及或但而并也都就个吧吗呢啊这那我你他她它们把被让从向于之为因每第更最又再]+/;
     const cnChunks = text.match(/[\u4e00-\u9fa5]{2,20}/g) || [];
     cnChunks.forEach((chunk) => {
         chunk.split(CN_SPLIT).forEach((p) => {
@@ -444,6 +418,7 @@ function extractTags(content, existing = []) {
     const arr = Array.from(out);
     return arr.slice(0, 30);
 }
+exports.extractTags = extractTags;
 /** 标签共享数（用于关联建议） */
 function tagShared(a, b) {
     if (!a.length || !b.length)
@@ -459,6 +434,7 @@ function computeNextReview(reviewCount, importance, baseDays, growth) {
     const days = baseDays * Math.pow(growth, Math.min(reviewCount, 10)) * (1 + (importance - 3) * 0.3);
     return Date.now() + Math.round(days * 86400000);
 }
+exports.computeNextReview = computeNextReview;
 /** 记忆健康度 0-100：重要性 + 访问活跃 - 遗忘惩罚 */
 function healthScore(item) {
     const now = Date.now();
@@ -472,6 +448,7 @@ function healthScore(item) {
         score = Math.max(score, 80);
     return Math.max(0, Math.min(100, Math.round(score)));
 }
+exports.healthScore = healthScore;
 /** 是否到期需要复习 */
 function isReviewDue(item, settings) {
     if (!settings.reviewEnabled)
@@ -480,6 +457,7 @@ function isReviewDue(item, settings) {
         return false;
     return Date.now() >= item.nextReviewAt;
 }
+exports.isReviewDue = isReviewDue;
 function tokenize(text) {
     const out = [];
     const words = text.match(/[a-zA-Z0-9][a-zA-Z0-9_-]{1,24}/g) || [];
@@ -516,6 +494,7 @@ function scoreRelevance(item, qTokens, tags) {
     const decay = Math.exp(-idleDays / 60);
     return Math.round(score * (0.75 + 0.25 * decay) * 100) / 100;
 }
+exports.scoreRelevance = scoreRelevance;
 function sortItems(items, sortBy) {
     const arr = items.slice();
     switch (sortBy) {
@@ -537,6 +516,7 @@ function sortItems(items, sortBy) {
     }
     return arr;
 }
+exports.sortItems = sortItems;
 /** 对命中记忆做一次访问记录（提高活跃度） */
 function touchItems(items) {
     const now = Date.now();
@@ -545,6 +525,7 @@ function touchItems(items) {
         it.lastAccessAt = now;
     });
 }
+exports.touchItems = touchItems;
 /* ---------------- 存储 ---------------- */
 function emptyStore() {
     return { version: 1, items: [], updatedAt: Date.now() };
@@ -572,6 +553,10 @@ function normalizeItem(raw) {
     };
     if (typeof raw.chatId === "string" && raw.chatId)
         item.chatId = raw.chatId;
+    if (typeof raw.characterId === "string" && raw.characterId)
+        item.characterId = raw.characterId;
+    if (typeof raw.characterName === "string" && raw.characterName)
+        item.characterName = raw.characterName;
     if (typeof raw.imagePath === "string" && raw.imagePath)
         item.imagePath = raw.imagePath;
     if (typeof raw.expiryAt === "number")
@@ -582,6 +567,7 @@ function normalizeItem(raw) {
         item.sensitive = true;
     return item;
 }
+exports.normalizeItem = normalizeItem;
 function normalizeStore(raw) {
     const store = emptyStore();
     if (!raw || typeof raw !== "object")
@@ -600,6 +586,7 @@ function normalizeStore(raw) {
     }
     return store;
 }
+exports.normalizeStore = normalizeStore;
 async function ensureDir() {
     try {
         const r = await Tools.Files.exists(exports.DATA_DIR);
@@ -620,6 +607,7 @@ function encryptStoreItems(store, key) {
         }
     });
 }
+exports.encryptStoreItems = encryptStoreItems;
 /** 解密 store 中敏感记忆内容 */
 function decryptStoreItems(store, key) {
     if (!key)
@@ -632,6 +620,7 @@ function decryptStoreItems(store, key) {
         }
     });
 }
+exports.decryptStoreItems = decryptStoreItems;
 /** 自动备份：写入 backup/memories_<ts>.json，保留最近 20 份 */
 async function backupStore(store, key) {
     try {
@@ -692,6 +681,7 @@ async function loadStore() {
         return emptyStore();
     }
 }
+exports.loadStore = loadStore;
 async function saveStore(store) {
     await ensureDir();
     store.updatedAt = Date.now();
@@ -720,6 +710,7 @@ async function saveStore(store) {
     encryptStoreItems(clone, key);
     await Tools.Files.write(exports.MEMORY_FILE, JSON.stringify(clone), false);
 }
+exports.saveStore = saveStore;
 async function loadSettings() {
     try {
         await ensureDir();
@@ -734,13 +725,16 @@ async function loadSettings() {
         return { ...exports.DEFAULT_SETTINGS };
     }
 }
+exports.loadSettings = loadSettings;
 async function saveSettings(s) {
     await ensureDir();
     await Tools.Files.write(exports.SETTINGS_FILE, JSON.stringify(s, null, 2), false);
 }
+exports.saveSettings = saveSettings;
 function findById(store, id) {
     return store.items.find((m) => m.id === id) || null;
 }
+exports.findById = findById;
 /** 相似度去重：内容重叠 >= 0.6 视为重复 */
 function similarity(a, b) {
     const ta = tokenize(a);
@@ -764,9 +758,13 @@ async function remember(store, input, settings) {
         conflicts = conflictDetect(store, content);
     }
     // 去重合并：内容高度相似时更新旧记忆（有冲突时不合并，保留旧记忆供确认）
+    // 角色隔离：只在同一角色域内合并 —— 否则角色A的话会被并进角色B的记忆，隔离从根上失效
     let merged = false;
     if (input.mergeSimilar !== false && conflicts.length === 0) {
+        const targetChar = String(input.characterId || "");
         for (const old of store.items) {
+            if (String(old.characterId || "") !== targetChar)
+                continue; // 跨角色绝不合并
             if (old.space === space && similarity(old.content, content) >= 0.6) {
                 old.content = content;
                 old.updatedAt = now;
@@ -808,6 +806,11 @@ async function remember(store, input, settings) {
     };
     if (typeof input.chatId === "string" && input.chatId)
         item.chatId = input.chatId;
+    if (typeof input.characterId === "string" && input.characterId) {
+        item.characterId = input.characterId;
+        if (typeof input.characterName === "string" && input.characterName)
+            item.characterName = input.characterName;
+    }
     // 图片记忆：复制图片进库并关联
     if (input.imagePath && detectImageExt(input.imagePath)) {
         const rel = await copyImageIntoLibrary(input.imagePath, item.id);
@@ -834,6 +837,7 @@ async function remember(store, input, settings) {
     });
     return { item, merged: false, related: findRelated(store, item, settings), conflicts };
 }
+exports.remember = remember;
 /** 自动关联建议：共享标签的记忆（>=2 个共同标签，或小标签集命中 1 个） */
 function findRelated(store, item, settings, max = 6) {
     if (!settings.autoLink)
@@ -851,6 +855,95 @@ function findRelated(store, item, settings, max = 6) {
         .slice(0, max);
     return candidates.map((x) => x.m);
 }
+exports.findRelated = findRelated;
+/* ---------------- 角色主线隔离 ---------------- */
+/**
+ * 角色可见性契约（唯一判定入口，注入/检索/统计全部必须走这里）：
+ *   - 未启用隔离          → 全部可见（向后兼容）
+ *   - 记忆无 characterId  → 全局记忆，是否可见取决于 injectGlobalMemory
+ *   - 记忆有 characterId  → 仅当与当前角色一致才可见，取决于 injectCharacterMemory
+ *   - 当前无角色          → 只能看到全局记忆
+ *
+ * 关键设计：所有路径共用这一个函数，杜绝"存的时候隔离了、查的时候漏了"。
+ */
+function isVisibleToCharacter(item, characterId, settings) {
+    if (!settings.characterIsolation)
+        return true;
+    const cur = String(characterId || "");
+    const owner = String(item.characterId || "");
+    if (!owner)
+        return settings.injectGlobalMemory !== false;
+    if (!cur)
+        return false; // 无角色身份：看不到任何角色私域记忆
+    if (owner !== cur)
+        return false; // 别的角色：一律不可见
+    return settings.injectCharacterMemory !== false;
+}
+exports.isVisibleToCharacter = isVisibleToCharacter;
+/** 从会话上下文里解析当前角色（宿主 event 结构层层兜底，任何一层命中即用） */
+function resolveCharacterId(evt) {
+    const paths = [
+        evt && evt.metadata && evt.metadata.activePrompt,
+        evt && evt.eventPayload && evt.eventPayload.metadata && evt.eventPayload.metadata.activePrompt,
+        evt && evt.eventPayload && evt.eventPayload.activePrompt,
+        evt && evt.activePrompt,
+    ];
+    for (const p of paths) {
+        if (!p || typeof p !== "object")
+            continue;
+        const type = String(p.type || "").toLowerCase();
+        const id = p.id || p.cardId || p.characterId;
+        if (!id)
+            continue;
+        // 只认角色卡类型；其它 prompt 类型（如普通 system）不算角色
+        if (type && type !== "character_card" && type !== "character" && type !== "persona")
+            continue;
+        return { id: String(id), name: String(p.name || p.displayName || p.title || "") };
+    }
+    return { id: "", name: "" };
+}
+exports.resolveCharacterId = resolveCharacterId;
+/** 维护角色注册表：记录出现过的角色，便于 UI 分组与历史记忆补名 */
+function touchCharacterRegistry(settings, id, name) {
+    if (!id)
+        return false;
+    if (!Array.isArray(settings.characterRegistry))
+        settings.characterRegistry = [];
+    const now = Date.now();
+    const hit = settings.characterRegistry.find((c) => c.id === id);
+    if (hit) {
+        let changed = false;
+        if (name && hit.name !== name) {
+            hit.name = name;
+            changed = true;
+        }
+        if (now - hit.lastSeenAt > 60000) {
+            hit.lastSeenAt = now;
+            changed = true;
+        }
+        return changed;
+    }
+    settings.characterRegistry.push({ id, name: name || "未命名角色", firstSeenAt: now, lastSeenAt: now, count: 0 });
+    return true;
+}
+exports.touchCharacterRegistry = touchCharacterRegistry;
+/** 统计每个角色名下记忆条数（纯计算，不落盘） */
+function characterStats(store, settings) {
+    const map = new Map();
+    store.items.forEach((m) => {
+        if (!m.characterId)
+            return;
+        const cur = map.get(m.characterId) || {
+            id: m.characterId,
+            name: m.characterName || (settings.characterRegistry || []).find((c) => c.id === m.characterId)?.name || "未知角色",
+            count: 0,
+        };
+        cur.count += 1;
+        map.set(m.characterId, cur);
+    });
+    return Array.from(map.values()).sort((a, b) => b.count - a.count);
+}
+exports.characterStats = characterStats;
 /** 执行检索（含过滤 + 打分 + 排序 + 访问记录 + 空间过滤 + 可选语义重排） */
 async function recall(store, q, settings) {
     const now = Date.now();
@@ -861,6 +954,9 @@ async function recall(store, q, settings) {
     const space = q.allSpaces ? null : (q.space || settings.activeSpace || "general");
     let filtered = store.items.filter((m) => {
         if (space && m.space !== space)
+            return false;
+        // 角色主流隔离：唯一判定入口（characterId 缺省=全局可见）
+        if (!q.allCharacters && !isVisibleToCharacter(m, q.characterId, settings))
             return false;
         // 对话归属过滤：默认仅通用记忆；传 chatId 则含该对话单独记忆；allChats 含全部
         if (q.allChats !== true) {
@@ -907,6 +1003,7 @@ async function recall(store, q, settings) {
     const limit = Math.max(1, Math.min(100, q.limit || 10));
     return { items: filtered.slice(0, limit), total, touched: true };
 }
+exports.recall = recall;
 function buildStats(store, settings) {
     const now = Date.now();
     const day = 86400000;
@@ -956,6 +1053,7 @@ function buildStats(store, settings) {
         injectTokenEstimate
     };
 }
+exports.buildStats = buildStats;
 /* ---------------- 复习队列 ---------------- */
 function reviewQueue(store, settings, limit = 10) {
     if (!settings.reviewEnabled)
@@ -965,6 +1063,7 @@ function reviewQueue(store, settings, limit = 10) {
         .sort((a, b) => a.nextReviewAt - b.nextReviewAt)
         .slice(0, Math.max(1, Math.min(50, limit)));
 }
+exports.reviewQueue = reviewQueue;
 /** 完成一次复习：重置遗忘曲线 */
 function completeReview(item, settings) {
     const now = Date.now();
@@ -972,6 +1071,7 @@ function completeReview(item, settings) {
     item.lastReviewedAt = now;
     item.nextReviewAt = computeNextReview(item.reviewCount, item.importance, settings.reviewBaseDays, settings.reviewGrowth);
 }
+exports.completeReview = completeReview;
 /* ---------------- 注入系统提示词 ---------------- */
 /* ---------------- 注入系统提示词（省钱引擎：压缩/缓存友好/冷热分级/日期提醒） ---------------- */
 /** 提取重要日期（生日/纪念日）：返回 月/日 */
@@ -985,6 +1085,7 @@ function extractAnnualDate(content) {
         return null;
     return { month, day };
 }
+exports.extractAnnualDate = extractAnnualDate;
 /** 计算距离下次该日期的天数（0=今天） */
 function daysUntil(month, day) {
     const now = new Date();
@@ -1012,6 +1113,7 @@ async function loadInjectionCache() {
         return null;
     }
 }
+exports.loadInjectionCache = loadInjectionCache;
 async function saveInjectionCache(hash, text) {
     try {
         await ensureDir();
@@ -1021,12 +1123,14 @@ async function saveInjectionCache(hash, text) {
         // ignore
     }
 }
+exports.saveInjectionCache = saveInjectionCache;
 /** 注入缓存 hash：记忆库版本 + 关键设置 + 当前对话 → 文本不变则缓存命中 */
-function injectionCacheHash(store, settings, chatId) {
+function injectionCacheHash(store, settings, chatId, characterId) {
     const parts = [
         String(store.updatedAt),
         String(store.items.length),
         String(chatId || ""),
+        String(characterId || ""), // 角色必须进 hash，否则切角色会命中上一角色的缓存
         settings.activeSpace,
         String(settings.injectCount),
         String(settings.injectIncludeDue),
@@ -1036,17 +1140,28 @@ function injectionCacheHash(store, settings, chatId) {
         String(settings.injectGeneral),
         String(settings.injectSpace),
         String(settings.birthdayRemind),
-        String(settings.reviewEnabled)
+        String(settings.reviewEnabled),
+        String(settings.characterIsolation),
+        String(settings.injectGlobalMemory),
+        String(settings.injectCharacterMemory)
     ];
     return parts.join("|");
 }
-function buildInjection(store, settings, maxChars = 1200, chatId) {
+exports.injectionCacheHash = injectionCacheHash;
+function buildInjection(store, settings, maxChars = 1200, chatId, characterId) {
     if (!settings.autoInject || store.items.length === 0)
         return "";
     const now = Date.now();
-    // 注入范围：通用记忆（chatId 为空，全局共享）∪ 单独记忆（chatId == 当前对话框）
-    const scopeItems = store.items.filter((m) => (settings.injectGeneral !== false && !m.chatId) ||
-        (settings.injectSpace !== false && chatId && m.chatId === chatId));
+    // 注入范围：三层过滤 —— 角色隔离 ∩ 对话归属 ∩ 空间
+    //   角色：isVisibleToCharacter 统一判定（全局记忆 or 当前角色私域）
+    //   对话：通用记忆（chatId 为空，全局共享）∪ 单独记忆（chatId == 当前对话框）
+    const curChar = String(characterId || "");
+    const scopeItems = store.items.filter((m) => {
+        if (!isVisibleToCharacter(m, curChar, settings))
+            return false;
+        return ((settings.injectGeneral !== false && !m.chatId) ||
+            (settings.injectSpace !== false && chatId && m.chatId === chatId));
+    });
     const compact = settings.compactInject !== false;
     const contentMax = compact ? 80 : 120;
     const tagMax = compact ? 2 : 4;
@@ -1062,7 +1177,7 @@ function buildInjection(store, settings, maxChars = 1200, chatId) {
         : [];
     const picked = [];
     const seen = new Set();
-    // 注入总条数上限（修复：原实现 only 限制了候选填充，pinned+due 可无限挤入）
+    // 注入总条数上限（修复：原实现只约束了候选填充，pinned+due 可无限挤入）
     const cap = Math.max(1, Number(settings.injectCount) || 3);
     // 置顶记忆优先占位（pinned = 常驻提示）；数量受总上限约束，避免置顶过多把预算吃光
     if (settings.injectPinnedAlways !== false) {
@@ -1181,6 +1296,7 @@ function buildInjection(store, settings, maxChars = 1200, chatId) {
     }
     return r.out.length > maxChars ? r.out.slice(0, maxChars) + "\n…" : r.out;
 }
+exports.buildInjection = buildInjection;
 /* ---------------- 图片记忆 ---------------- */
 const IMAGE_EXTS = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "avif"];
 /** 校验路径是否为图片文件，返回扩展名；非图片返回空 */
@@ -1191,6 +1307,7 @@ function detectImageExt(path) {
     const ext = m[1].toLowerCase();
     return IMAGE_EXTS.includes(ext) ? ext : "";
 }
+exports.detectImageExt = detectImageExt;
 /** 复制本地图片进记忆库 images/ 目录，返回相对路径（images/<id>.<ext>）；失败返回空 */
 async function copyImageIntoLibrary(sourcePath, id) {
     const ext = detectImageExt(sourcePath);
@@ -1208,6 +1325,7 @@ async function copyImageIntoLibrary(sourcePath, id) {
         return "";
     }
 }
+exports.copyImageIntoLibrary = copyImageIntoLibrary;
 /** 把记忆关联的图片复制到导出目录（返回导出的绝对路径） */
 async function copyImageForExport(item, targetDir) {
     if (!item.imagePath)
@@ -1226,6 +1344,7 @@ async function copyImageForExport(item, targetDir) {
         return "";
     }
 }
+exports.copyImageForExport = copyImageForExport;
 /** 导出完整记忆包（目录：memories.json + images/），可直接拷贝/压缩分享 */
 async function exportBundle(store, settings) {
     const dir = `${exports.EXPORT_DIR}/backup_${Date.now()}`;
@@ -1257,6 +1376,7 @@ async function exportBundle(store, settings) {
     await Tools.Files.write(`${dir}/README.txt`, `深度记忆备份\n时间：${formatTime(Date.now())}\n记忆条数：${clone.items.length}\n图片：${imageCount} 张\n恢复：dm_import_bundle(path="此目录或压缩包")`, false);
     return { bundlePath: dir, memoryCount: clone.items.length, imageCount };
 }
+exports.exportBundle = exportBundle;
 /** 从 bundle 导入（支持目录或 zip；合并；memories.json 内为加密内容时需密钥） */
 async function importBundle(store, bundlePath, settings) {
     let baseDir = bundlePath;
@@ -1310,10 +1430,12 @@ async function importBundle(store, bundlePath, settings) {
     store.items = fresh.concat(store.items).slice(0, exports.MAX_MEMORIES);
     return { added: fresh.length, imageCount };
 }
+exports.importBundle = importBundle;
 /* ---------------- 导入导出 ---------------- */
 function exportJson(store) {
     return JSON.stringify({ app: "deep_memory", version: 1, exportedAt: Date.now(), items: store.items }, null, 2);
 }
+exports.exportJson = exportJson;
 function importJson(store, raw, mode) {
     let parsed = null;
     try {
@@ -1339,3 +1461,4 @@ function importJson(store, raw, mode) {
         return { added: fresh.length, total: store.items.length };
     }
 }
+exports.importJson = importJson;

@@ -110,6 +110,24 @@
                     "required": false
                 },
                 {
+                    "name": "characterId",
+                    "description": {
+                        "zh": "角色主线：这条记忆归属哪个角色（角色卡 ID）。不传=全局记忆，所有角色都能看到。传了则只有该角色能看到——用于让不同角色各记各的、互不串味。",
+                        "en": "Character lane: which character owns this memory (character card ID). Omit = global memory visible to every character. Set it to keep each character's memories separate."
+                    },
+                    "type": "string",
+                    "required": false
+                },
+                {
+                    "name": "characterName",
+                    "description": {
+                        "zh": "角色显示名（仅用于面板展示，可省略）",
+                        "en": "Character display name (panel display only, optional)"
+                    },
+                    "type": "string",
+                    "required": false
+                },
+                {
                     "name": "imagePath",
                     "description": {
                         "zh": "图片记忆：本地图片文件路径（jpg/png/webp/gif/bmp/heic/avif），会自动复制进记忆库并与本条记忆关联；content 可留空或写描述",
@@ -217,7 +235,7 @@
                     "type": "string",
                     "required": false
                 },
-                {
+{
                     "name": "allChats",
                     "description": {
                         "zh": "true=包含全部对话框的单独记忆",
@@ -225,7 +243,25 @@
                     },
                     "type": "boolean",
                     "required": false
-                }
+                },
+                {
+                    "name": "characterId",
+                    "description": {
+                        "zh": "角色主线：以哪个角色的身份检索。传=该角色的记忆+全局记忆；不传=仅全局记忆（看不到任何角色的私域记忆）",
+                        "en": "Character lane: recall as this character (its own memories + global). Omit = global memories only."
+                    },
+                    "type": "string",
+                    "required": false
+                },
+                {
+                    "name": "allCharacters",
+                    "description": {
+                        "zh": "true=忽略角色隔离，检索全部角色的记忆（管理/审计场景用）",
+                        "en": "true = ignore character isolation and search every character's memories (admin/audit use)"
+                    },
+                    "type": "boolean",
+                    "required": false
+                },
             ]
         },
         {
@@ -579,37 +615,7 @@
 }
 */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.dm_remember = dm_remember;
-exports.dm_recall = dm_recall;
-exports.dm_forget = dm_forget;
-exports.dm_update = dm_update;
-exports.dm_link = dm_link;
-exports.dm_unlink = dm_unlink;
-exports.dm_review = dm_review;
-exports.dm_stats = dm_stats;
-exports.dm_options = dm_options;
-exports.dm_report = dm_report;
-exports.dm_extract = dm_extract;
-exports.dm_conflicts = dm_conflicts;
-exports.dm_export = dm_export;
-exports.dm_import = dm_import;
-exports.dm_export_bundle = dm_export_bundle;
-exports.dm_import_bundle = dm_import_bundle;
-exports.ipcGetAll = ipcGetAll;
-exports.ipcDelete = ipcDelete;
-exports.ipcUpdateImportance = ipcUpdateImportance;
-exports.ipcSetPinned = ipcSetPinned;
-exports.ipcReviewDone = ipcReviewDone;
-exports.ipcSettingsGet = ipcSettingsGet;
-exports.ipcSettingsSet = ipcSettingsSet;
-exports.ipcSuggestLinks = ipcSuggestLinks;
-exports.ipcRecallForUi = ipcRecallForUi;
-exports.ipcStatsForUi = ipcStatsForUi;
-exports.ipcReviewForUi = ipcReviewForUi;
-exports.ipcInjectionPreview = ipcInjectionPreview;
-exports.ipcReport = ipcReport;
-exports.ipcConflicts = ipcConflicts;
-exports.ipcAutoExtract = ipcAutoExtract;
+exports.ipcAutoExtract = exports.ipcCharacterPreview = exports.ipcCharacterForget = exports.ipcCharacterMigrate = exports.ipcCharacterAssign = exports.ipcCharacterRegister = exports.ipcCharacterList = exports.ipcConflicts = exports.ipcReport = exports.ipcInjectionPreview = exports.ipcReviewForUi = exports.ipcStatsForUi = exports.ipcRecallForUi = exports.ipcSuggestLinks = exports.ipcSettingsSet = exports.ipcSettingsGet = exports.ipcReviewDone = exports.ipcSetPinned = exports.ipcUpdateImportance = exports.ipcDelete = exports.ipcGetAll = exports.dm_import_bundle = exports.dm_export_bundle = exports.dm_import = exports.dm_export = exports.dm_conflicts = exports.dm_extract = exports.dm_report = exports.dm_options = exports.dm_stats = exports.dm_review = exports.dm_unlink = exports.dm_link = exports.dm_update = exports.dm_forget = exports.dm_recall = exports.dm_remember = void 0;
 const memory_core_1 = require("../memory-core");
 function wrapResult(ok, message, data) {
     return { success: ok, message, data };
@@ -638,6 +644,8 @@ function publicItem(m) {
         links: m.links,
         space: m.space,
         chatId: m.chatId || "",
+        characterId: m.characterId || "",
+        characterName: m.characterName || "",
         imagePath: m.imagePath ? `/sdcard/Download/Operit/plugins/${memory_core_1.PLUGIN_ID}/${m.imagePath}` : "",
         expiryAt: m.expiryAt || null
     };
@@ -669,6 +677,8 @@ async function dm_remember(params) {
         space: p.space,
         sensitive: p.sensitive,
         chatId: p.chatId,
+        characterId: p.characterId,
+        characterName: p.characterName,
         imagePath: p.imagePath
     }, settings);
     // 记录冲突到 store（供注入提醒）
@@ -689,6 +699,7 @@ async function dm_remember(params) {
         : "";
     return wrapResult(true, `${head}：${typeInfo.emoji} ${typeInfo.labelZh}「${item.content.slice(0, 60)}」（ID=${item.id}，重要性 ${item.importance}/5${item.pinned ? "，已置顶" : ""}${spaceText}${sensText}）${relatedText}${conflictText}`, publicItem(item));
 }
+exports.dm_remember = dm_remember;
 /* ---------------- dm_recall ---------------- */
 async function dm_recall(params) {
     const p = params || {};
@@ -705,7 +716,9 @@ async function dm_recall(params) {
         space: p.space,
         allSpaces: p.allSpaces === true,
         chatId: p.chatId,
-        allChats: p.allChats === true
+        allChats: p.allChats === true,
+        characterId: p.characterId,
+        allCharacters: p.allCharacters === true
     }, settings);
     if (r.touched)
         await (0, memory_core_1.saveStore)(store);
@@ -717,6 +730,7 @@ async function dm_recall(params) {
     const summary = list.map((it) => `${it.emoji}[${it.id}] ${it.content.slice(0, 50)}${it.tags.length ? " #" + it.tags.slice(0, 3).join("#") : ""}`).join("\n");
     return wrapResult(true, `找到 ${r.total} 条记忆${spaceText}（显示前 ${list.length} 条）：\n${summary}`, { total: r.total, items: list });
 }
+exports.dm_recall = dm_recall;
 /* ---------------- dm_forget ---------------- */
 async function dm_forget(params) {
     const p = params || {};
@@ -773,6 +787,7 @@ async function dm_forget(params) {
     await (0, memory_core_1.saveStore)(store);
     return wrapResult(true, detail + `（剩余 ${store.items.length} 条）`, { removed, total: store.items.length });
 }
+exports.dm_forget = dm_forget;
 /* ---------------- dm_update ---------------- */
 async function dm_update(params) {
     const p = params || {};
@@ -817,6 +832,7 @@ async function dm_update(params) {
     await (0, memory_core_1.saveStore)(store);
     return wrapResult(true, `已更新记忆 ${id}（${changed.join("、") || "无字段变更"}）`, publicItem(item));
 }
+exports.dm_update = dm_update;
 /* ---------------- dm_link / dm_unlink ---------------- */
 async function dm_link(params) {
     const p = params || {};
@@ -838,6 +854,7 @@ async function dm_link(params) {
     await (0, memory_core_1.saveStore)(store);
     return wrapResult(true, `已建立关联：${a} ↔ ${b}`, { from: publicItem(ia), to: publicItem(ib) });
 }
+exports.dm_link = dm_link;
 async function dm_unlink(params) {
     const p = params || {};
     const a = String(p.fromId || "").trim();
@@ -854,6 +871,7 @@ async function dm_unlink(params) {
     await (0, memory_core_1.saveStore)(store);
     return wrapResult(true, `已解除关联：${a} ↮ ${b}`, null);
 }
+exports.dm_unlink = dm_unlink;
 /* ---------------- dm_review ---------------- */
 async function dm_review(params) {
     const p = params || {};
@@ -871,6 +889,7 @@ async function dm_review(params) {
     const lines = list.map((it) => `- ${it.emoji} ${it.content.slice(0, 60)}（距上次复习 ${it.reviewCount} 次，健康度 ${it.health}）`).join("\n");
     return wrapResult(true, `有 ${queue.length} 条记忆到期需要复习（遗忘曲线）：\n${lines}\n复习完成后可调用 dm_review(complete=true) 标记。`, { due: queue.length, items: list });
 }
+exports.dm_review = dm_review;
 /* ---------------- dm_stats ---------------- */
 async function dm_stats() {
     const store = await (0, memory_core_1.loadStore)();
@@ -889,6 +908,7 @@ async function dm_stats() {
         : "";
     return wrapResult(true, `记忆洞察：共 ${stats.total} 条（${stats.sinceDays} 天内积累），今日新增 ${stats.todayAdded}，本周新增 ${stats.weekAdded}，平均健康度 ${stats.avgHealth}/100，累计访问 ${stats.totalAccess} 次，待复习 ${stats.dueReview} 条。\n类型分布：${dist || "无"}${stats.tagCloud.length ? "\n热门标签：" + tags : ""}\n省钱统计：${money}${cleanTip}${expiredTip}`, stats);
 }
+exports.dm_stats = dm_stats;
 /* ---------------- dm_options ---------------- */
 async function dm_options() {
     const store = await (0, memory_core_1.loadStore)();
@@ -907,6 +927,7 @@ async function dm_options() {
         injectionPreview: injection
     });
 }
+exports.dm_options = dm_options;
 /* ---------------- dm_report / dm_extract / dm_conflicts ---------------- */
 async function dm_report(params) {
     const p = params || {};
@@ -915,6 +936,7 @@ async function dm_report(params) {
     const report = (0, memory_core_1.buildReport)(store, settings, p.space, typeof p.days === "number" ? p.days : undefined);
     return wrapResult(true, `已生成记忆报告（${report.length} 字符）：\n${report.slice(0, 600)}${report.length > 600 ? "\n…（完整报告见 data.report）" : ""}`, { report });
 }
+exports.dm_report = dm_report;
 async function dm_extract(params) {
     const p = params || {};
     const text = String(p.text || "").trim();
@@ -926,6 +948,7 @@ async function dm_extract(params) {
     }
     return wrapResult(true, `检测到记忆意图：类型=${memory_core_1.TYPE_MAP[intent.type].labelZh}，重要性 ${intent.importance}/5${intent.sensitive ? "，敏感（将加密存储）" : ""}。内容：「${intent.content}」。可直接调用 dm_remember 写入（或确认后由自动提取写入）。`, { matched: true, intent });
 }
+exports.dm_extract = dm_extract;
 async function dm_conflicts(params) {
     const p = params || {};
     const store = await (0, memory_core_1.loadStore)();
@@ -941,12 +964,14 @@ async function dm_conflicts(params) {
     const lines = conflicts.map((c, i) => `${i + 1}. 旧记忆「${c.existingContent.slice(0, 50)}」vs 新信息「${c.newContent.slice(0, 50)}」——${c.field} 不一致（${(0, memory_core_1.formatTime)(c.at)}）`);
     return wrapResult(true, `有 ${conflicts.length} 处记忆冲突待确认：\n${lines.join("\n")}\n确认后可用 dm_update 修正旧记忆，或用 dm_conflicts(clear=true) 清空提醒。`, { conflicts });
 }
+exports.dm_conflicts = dm_conflicts;
 /* ---------------- dm_export / dm_import ---------------- */
 async function dm_export() {
     const store = await (0, memory_core_1.loadStore)();
     const json = (0, memory_core_1.exportJson)(store);
     return wrapResult(true, `已导出 ${store.items.length} 条记忆（JSON 字符串见 data.json），可用于备份或迁移。`, { json, count: store.items.length });
 }
+exports.dm_export = dm_export;
 async function dm_import(params) {
     const p = params || {};
     const raw = String(p.json || "").trim();
@@ -963,6 +988,7 @@ async function dm_import(params) {
         return wrapResult(false, "导入失败：" + (e && e.message ? e.message : String(e)), null);
     }
 }
+exports.dm_import = dm_import;
 /* ---------------- dm_export_bundle / dm_import_bundle（JSON + 图片完整备份） ---------------- */
 async function dm_export_bundle() {
     const store = await (0, memory_core_1.loadStore)();
@@ -975,6 +1001,7 @@ async function dm_export_bundle() {
         return wrapResult(false, "导出失败：" + (e && e.message ? e.message : String(e)), null);
     }
 }
+exports.dm_export_bundle = dm_export_bundle;
 async function dm_import_bundle(params) {
     const p = params || {};
     const path = String(p.path || "").trim();
@@ -991,6 +1018,7 @@ async function dm_import_bundle(params) {
         return wrapResult(false, "导入失败：" + (e && e.message ? e.message : String(e)), null);
     }
 }
+exports.dm_import_bundle = dm_import_bundle;
 /* ---------------- IPC 辅助（main 用） ---------------- */
 async function ipcGetAll(limit) {
     const store = await (0, memory_core_1.loadStore)();
@@ -998,21 +1026,25 @@ async function ipcGetAll(limit) {
     // 时间线按创建时间倒序：最新的记忆排在最上面。
     // 原实现直接 slice 取插入顺序，导致 旧→新 且超限时丢掉最新记忆。
     const items = store.items
-      .slice()
-      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || (b.updatedAt || 0) - (a.updatedAt || 0))
-      .slice(0, cap)
-      .map(publicItem);
+        .slice()
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || (b.updatedAt || 0) - (a.updatedAt || 0))
+        .slice(0, cap)
+        .map(publicItem);
     return wrapResult(true, `共 ${store.items.length} 条记忆`, { total: store.items.length, items });
 }
+exports.ipcGetAll = ipcGetAll;
 async function ipcDelete(id) {
     return dm_forget({ id });
 }
+exports.ipcDelete = ipcDelete;
 async function ipcUpdateImportance(id, importance) {
     return dm_update({ id, importance });
 }
+exports.ipcUpdateImportance = ipcUpdateImportance;
 async function ipcSetPinned(id, pinned) {
     return dm_update({ id, pinned });
 }
+exports.ipcSetPinned = ipcSetPinned;
 async function ipcReviewDone(id) {
     const store = await (0, memory_core_1.loadStore)();
     const settings = await (0, memory_core_1.loadSettings)();
@@ -1023,10 +1055,12 @@ async function ipcReviewDone(id) {
     await (0, memory_core_1.saveStore)(store);
     return wrapResult(true, `记忆 ${id} 已标记复习完成，下次复习：${(0, memory_core_1.formatTime)(item.nextReviewAt)}`, publicItem(item));
 }
+exports.ipcReviewDone = ipcReviewDone;
 async function ipcSettingsGet() {
     const settings = await (0, memory_core_1.loadSettings)();
     return wrapResult(true, "设置已加载", settings);
 }
+exports.ipcSettingsGet = ipcSettingsGet;
 async function ipcSettingsSet(patch) {
     const settings = await (0, memory_core_1.loadSettings)();
     Object.keys(patch || {}).forEach((k) => {
@@ -1037,6 +1071,7 @@ async function ipcSettingsSet(patch) {
     await (0, memory_core_1.saveSettings)(settings);
     return wrapResult(true, "设置已保存", settings);
 }
+exports.ipcSettingsSet = ipcSettingsSet;
 async function ipcSuggestLinks(id) {
     const store = await (0, memory_core_1.loadStore)();
     const settings = await (0, memory_core_1.loadSettings)();
@@ -1046,26 +1081,161 @@ async function ipcSuggestLinks(id) {
     const related = (0, memory_core_1.findRelated)(store, item, settings, 8);
     return wrapResult(true, `找到 ${related.length} 条可关联记忆`, related.map(publicItem));
 }
+exports.ipcSuggestLinks = ipcSuggestLinks;
 async function ipcRecallForUi(params) {
     return dm_recall(params);
 }
+exports.ipcRecallForUi = ipcRecallForUi;
 async function ipcStatsForUi() {
     return dm_stats();
 }
+exports.ipcStatsForUi = ipcStatsForUi;
 async function ipcReviewForUi(limit) {
     return dm_review({ limit });
 }
+exports.ipcReviewForUi = ipcReviewForUi;
 async function ipcInjectionPreview() {
     const store = await (0, memory_core_1.loadStore)();
     const settings = await (0, memory_core_1.loadSettings)();
     return wrapResult(true, "注入预览", (0, memory_core_1.buildInjection)(store, settings));
 }
+exports.ipcInjectionPreview = ipcInjectionPreview;
 async function ipcReport(space, days) {
     return dm_report({ space, days });
 }
+exports.ipcReport = ipcReport;
 async function ipcConflicts(clear) {
     return dm_conflicts({ clear });
 }
+exports.ipcConflicts = ipcConflicts;
+/* ---------------- 角色主线 IPC（v1.2.0） ---------------- */
+/** 列出所有角色 + 各自记忆条数 + 全局记忆条数 */
+async function ipcCharacterList() {
+    const store = await (0, memory_core_1.loadStore)();
+    const settings = await (0, memory_core_1.loadSettings)();
+    const stats = (0, memory_core_1.characterStats)(store, settings);
+    const globalCount = store.items.filter((m) => !m.characterId).length;
+    // 注册表里的角色即使 0 条记忆也列出来（刚出现还没写记忆）
+    const merged = new Map();
+    stats.forEach((s) => {
+        const reg = (settings.characterRegistry || []).find((c) => c.id === s.id);
+        merged.set(s.id, { id: s.id, name: s.name, count: s.count, lastSeenAt: reg ? reg.lastSeenAt : 0 });
+    });
+    (settings.characterRegistry || []).forEach((c) => {
+        if (!merged.has(c.id))
+            merged.set(c.id, { id: c.id, name: c.name, count: 0, lastSeenAt: c.lastSeenAt });
+    });
+    const list = Array.from(merged.values()).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+    return wrapResult(true, `共 ${list.length} 个角色 / 全局记忆 ${globalCount} 条`, {
+        characters: list,
+        globalCount,
+        isolation: settings.characterIsolation !== false
+    });
+}
+exports.ipcCharacterList = ipcCharacterList;
+/** 注册或重命名一个角色 */
+async function ipcCharacterRegister(id, name) {
+    if (!id)
+        return wrapResult(false, "缺少角色 id", null);
+    const settings = await (0, memory_core_1.loadSettings)();
+    (0, memory_core_1.touchCharacterRegistry)(settings, id, name || "");
+    await (0, memory_core_1.saveSettings)(settings);
+    return wrapResult(true, `角色已登记：${name || id}`, null);
+}
+exports.ipcCharacterRegister = ipcCharacterRegister;
+/** 把某条记忆迁移到指定角色（传空字符串=转为全局记忆） */
+async function ipcCharacterAssign(memoryId, characterId, characterName) {
+    const store = await (0, memory_core_1.loadStore)();
+    const item = (0, memory_core_1.findById)(store, memoryId);
+    if (!item)
+        return wrapResult(false, `未找到记忆 ${memoryId}`, null);
+    const target = String(characterId || "");
+    if (target) {
+        item.characterId = target;
+        if (characterName)
+            item.characterName = characterName;
+    }
+    else {
+        delete item.characterId;
+        delete item.characterName;
+    }
+    item.updatedAt = Date.now();
+    await (0, memory_core_1.saveStore)(store);
+    return wrapResult(true, target ? `已归入角色 ${characterName || target}` : "已转为全局记忆", publicItem(item));
+}
+exports.ipcCharacterAssign = ipcCharacterAssign;
+/** 批量迁移：把某角色的全部记忆转给另一个角色（或转全局） */
+async function ipcCharacterMigrate(fromId, toId, toName) {
+    const store = await (0, memory_core_1.loadStore)();
+    const settings = await (0, memory_core_1.loadSettings)();
+    const from = String(fromId || "");
+    const to = String(toId || "");
+    let n = 0;
+    store.items.forEach((m) => {
+        if (String(m.characterId || "") !== from)
+            return;
+        if (to) {
+            m.characterId = to;
+            if (toName)
+                m.characterName = toName;
+        }
+        else {
+            delete m.characterId;
+            delete m.characterName;
+        }
+        m.updatedAt = Date.now();
+        n++;
+    });
+    if (n)
+        await (0, memory_core_1.saveStore)(store);
+    // 迁移完把来源角色从注册表移除
+    if (from && from !== to) {
+        settings.characterRegistry = (settings.characterRegistry || []).filter((c) => c.id !== from);
+        await (0, memory_core_1.saveSettings)(settings);
+    }
+    return wrapResult(true, `已迁移 ${n} 条记忆 → ${to ? (toName || to) : "全局"}`, { moved: n });
+}
+exports.ipcCharacterMigrate = ipcCharacterMigrate;
+/** 移除角色（其记忆默认转全局，不丢数据） */
+async function ipcCharacterForget(id, keepMemories = true) {
+    const store = await (0, memory_core_1.loadStore)();
+    const settings = await (0, memory_core_1.loadSettings)();
+    const target = String(id || "");
+    if (!target)
+        return wrapResult(false, "缺少角色 id", null);
+    let n = 0;
+    if (keepMemories) {
+        store.items.forEach((m) => {
+            if (String(m.characterId || "") === target) {
+                delete m.characterId;
+                delete m.characterName;
+                m.updatedAt = Date.now();
+                n++;
+            }
+        });
+        if (n)
+            await (0, memory_core_1.saveStore)(store);
+    }
+    else {
+        const before = store.items.length;
+        store.items = store.items.filter((m) => String(m.characterId || "") !== target);
+        n = before - store.items.length;
+        if (n)
+            await (0, memory_core_1.saveStore)(store);
+    }
+    settings.characterRegistry = (settings.characterRegistry || []).filter((c) => c.id !== target);
+    await (0, memory_core_1.saveSettings)(settings);
+    return wrapResult(true, keepMemories ? `角色已移除，${n} 条记忆转为全局` : `角色已移除，删除 ${n} 条记忆`, { affected: n });
+}
+exports.ipcCharacterForget = ipcCharacterForget;
+/** 以某角色身份预览注入文本（用于验证隔离是否生效） */
+async function ipcCharacterPreview(characterId) {
+    const store = await (0, memory_core_1.loadStore)();
+    const settings = await (0, memory_core_1.loadSettings)();
+    const text = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, undefined, String(characterId || ""));
+    return wrapResult(true, "注入预览", { characterId: String(characterId || ""), text, length: text.length });
+}
+exports.ipcCharacterPreview = ipcCharacterPreview;
 async function ipcAutoExtract(text, chatId) {
     const t = String(text || "").trim();
     if (!t)
@@ -1075,6 +1245,7 @@ async function ipcAutoExtract(text, chatId) {
     try {
         const st0 = await (0, memory_core_1.loadSettings)();
         if (st0.aiExtract !== false) {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
             const ai = require("../ai-extract");
             if (ai && typeof ai.aiExtractText === "function") {
                 return await ai.aiExtractText(t, chatId);
@@ -1109,3 +1280,4 @@ async function ipcAutoExtract(text, chatId) {
     const typeInfo = memory_core_1.TYPE_MAP[result.item.type] || memory_core_1.TYPE_MAP["fact"];
     return wrapResult(true, `已自动记忆：${typeInfo.emoji} ${typeInfo.labelZh}「${result.item.content.slice(0, 60)}」${result.item.sensitive ? "（已加密）" : ""}${result.item.chatId ? "（单独记忆·仅本对话框）" : "（通用记忆）"}${result.conflicts.length ? " ⚠️ 发现冲突：" + result.conflicts.length + " 处" : ""}`, publicItem(result.item));
 }
+exports.ipcAutoExtract = ipcAutoExtract;

@@ -109,6 +109,24 @@
                     "required": false
                 },
                 {
+                    "name": "characterId",
+                    "description": {
+                        "zh": "角色主线：这条记忆归属哪个角色（角色卡 ID）。不传=全局记忆，所有角色都能看到。传了则只有该角色能看到——用于让不同角色各记各的、互不串味。",
+                        "en": "Character lane: which character owns this memory (character card ID). Omit = global memory visible to every character. Set it to keep each character's memories separate."
+                    },
+                    "type": "string",
+                    "required": false
+                },
+                {
+                    "name": "characterName",
+                    "description": {
+                        "zh": "角色显示名（仅用于面板展示，可省略）",
+                        "en": "Character display name (panel display only, optional)"
+                    },
+                    "type": "string",
+                    "required": false
+                },
+                {
                     "name": "imagePath",
                     "description": {
                         "zh": "图片记忆：本地图片文件路径（jpg/png/webp/gif/bmp/heic/avif），会自动复制进记忆库并与本条记忆关联；content 可留空或写描述",
@@ -216,7 +234,7 @@
                     "type": "string",
                     "required": false
                 },
-                {
+{
                     "name": "allChats",
                     "description": {
                         "zh": "true=包含全部对话框的单独记忆",
@@ -224,7 +242,25 @@
                     },
                     "type": "boolean",
                     "required": false
-                }
+                },
+                {
+                    "name": "characterId",
+                    "description": {
+                        "zh": "角色主线：以哪个角色的身份检索。传=该角色的记忆+全局记忆；不传=仅全局记忆（看不到任何角色的私域记忆）",
+                        "en": "Character lane: recall as this character (its own memories + global). Omit = global memories only."
+                    },
+                    "type": "string",
+                    "required": false
+                },
+                {
+                    "name": "allCharacters",
+                    "description": {
+                        "zh": "true=忽略角色隔离，检索全部角色的记忆（管理/审计场景用）",
+                        "en": "true = ignore character isolation and search every character's memories (admin/audit use)"
+                    },
+                    "type": "boolean",
+                    "required": false
+                },
             ]
         },
         {
@@ -585,6 +621,7 @@ import {
   buildInjection,
   buildReport,
   buildStats,
+  characterStats,
   clampImportance,
   completeReview,
   conflictDetect,
@@ -607,6 +644,7 @@ import {
   reviewQueue,
   saveSettings,
   saveStore,
+  touchCharacterRegistry,
   type BundleExportResult,
   type BundleImportResult,
   type ConflictInfo,
@@ -650,6 +688,8 @@ function publicItem(m: MemoryItem): Record<string, unknown> {
     links: m.links,
     space: m.space,
     chatId: m.chatId || "",
+    characterId: m.characterId || "",
+    characterName: m.characterName || "",
     imagePath: m.imagePath ? `/sdcard/Download/Operit/plugins/${PLUGIN_ID}/${m.imagePath}` : "",
     expiryAt: m.expiryAt || null
   };
@@ -668,6 +708,8 @@ export async function dm_remember(params?: {
   space?: string;
   sensitive?: boolean;
   chatId?: string;  // 单独记忆：仅该对话框可见；空=通用记忆
+  characterId?: string;   // 角色主线：归属哪个角色；空=全局记忆（所有角色可见）
+  characterName?: string; // 角色显示名，仅用于面板展示
   imagePath?: string; // 图片记忆：本地图片路径（复制进记忆库）
 }): Promise<ToolResult> {
   const p = params || {};
@@ -695,6 +737,8 @@ export async function dm_remember(params?: {
     space: p.space,
     sensitive: p.sensitive,
     chatId: p.chatId,
+    characterId: p.characterId,
+    characterName: p.characterName,
     imagePath: p.imagePath
   }, settings);
   // 记录冲突到 store（供注入提醒）
@@ -735,6 +779,8 @@ export async function dm_recall(params?: {
   allSpaces?: boolean;
   chatId?: string;
   allChats?: boolean;
+  characterId?: string;
+  allCharacters?: boolean;
 }): Promise<ToolResult> {
   const p = params || {};
   const store = await loadStore();
@@ -750,7 +796,9 @@ export async function dm_recall(params?: {
     space: p.space,
     allSpaces: p.allSpaces === true,
     chatId: p.chatId,
-    allChats: p.allChats === true
+    allChats: p.allChats === true,
+    characterId: p.characterId,
+    allCharacters: p.allCharacters === true
   }, settings);
   if (r.touched) await saveStore(store);
 
@@ -1161,6 +1209,115 @@ export async function ipcReport(space?: string, days?: number): Promise<ToolResu
 
 export async function ipcConflicts(clear?: boolean): Promise<ToolResult> {
   return dm_conflicts({ clear });
+}
+
+/* ---------------- 角色主线 IPC（v1.2.0） ---------------- */
+
+/** 列出所有角色 + 各自记忆条数 + 全局记忆条数 */
+export async function ipcCharacterList(): Promise<ToolResult> {
+  const store = await loadStore();
+  const settings = await loadSettings();
+  const stats = characterStats(store, settings);
+  const globalCount = store.items.filter((m) => !m.characterId).length;
+  // 注册表里的角色即使 0 条记忆也列出来（刚出现还没写记忆）
+  const merged = new Map<string, { id: string; name: string; count: number; lastSeenAt: number }>();
+  stats.forEach((s) => {
+    const reg = (settings.characterRegistry || []).find((c) => c.id === s.id);
+    merged.set(s.id, { id: s.id, name: s.name, count: s.count, lastSeenAt: reg ? reg.lastSeenAt : 0 });
+  });
+  (settings.characterRegistry || []).forEach((c) => {
+    if (!merged.has(c.id)) merged.set(c.id, { id: c.id, name: c.name, count: 0, lastSeenAt: c.lastSeenAt });
+  });
+  const list = Array.from(merged.values()).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+  return wrapResult(true, `共 ${list.length} 个角色 / 全局记忆 ${globalCount} 条`, {
+    characters: list,
+    globalCount,
+    isolation: settings.characterIsolation !== false
+  });
+}
+
+/** 注册或重命名一个角色 */
+export async function ipcCharacterRegister(id: string, name: string): Promise<ToolResult> {
+  if (!id) return wrapResult(false, "缺少角色 id", null);
+  const settings = await loadSettings();
+  touchCharacterRegistry(settings, id, name || "");
+  await saveSettings(settings);
+  return wrapResult(true, `角色已登记：${name || id}`, null);
+}
+
+/** 把某条记忆迁移到指定角色（传空字符串=转为全局记忆） */
+export async function ipcCharacterAssign(memoryId: string, characterId: string, characterName?: string): Promise<ToolResult> {
+  const store = await loadStore();
+  const item = findById(store, memoryId);
+  if (!item) return wrapResult(false, `未找到记忆 ${memoryId}`, null);
+  const target = String(characterId || "");
+  if (target) {
+    item.characterId = target;
+    if (characterName) item.characterName = characterName;
+  } else {
+    delete item.characterId;
+    delete item.characterName;
+  }
+  item.updatedAt = Date.now();
+  await saveStore(store);
+  return wrapResult(true, target ? `已归入角色 ${characterName || target}` : "已转为全局记忆", publicItem(item));
+}
+
+/** 批量迁移：把某角色的全部记忆转给另一个角色（或转全局） */
+export async function ipcCharacterMigrate(fromId: string, toId: string, toName?: string): Promise<ToolResult> {
+  const store = await loadStore();
+  const settings = await loadSettings();
+  const from = String(fromId || "");
+  const to = String(toId || "");
+  let n = 0;
+  store.items.forEach((m) => {
+    if (String(m.characterId || "") !== from) return;
+    if (to) { m.characterId = to; if (toName) m.characterName = toName; }
+    else { delete m.characterId; delete m.characterName; }
+    m.updatedAt = Date.now();
+    n++;
+  });
+  if (n) await saveStore(store);
+  // 迁移完把来源角色从注册表移除
+  if (from && from !== to) {
+    settings.characterRegistry = (settings.characterRegistry || []).filter((c) => c.id !== from);
+    await saveSettings(settings);
+  }
+  return wrapResult(true, `已迁移 ${n} 条记忆 → ${to ? (toName || to) : "全局"}`, { moved: n });
+}
+
+/** 移除角色（其记忆默认转全局，不丢数据） */
+export async function ipcCharacterForget(id: string, keepMemories: boolean = true): Promise<ToolResult> {
+  const store = await loadStore();
+  const settings = await loadSettings();
+  const target = String(id || "");
+  if (!target) return wrapResult(false, "缺少角色 id", null);
+  let n = 0;
+  if (keepMemories) {
+    store.items.forEach((m) => {
+      if (String(m.characterId || "") === target) {
+        delete m.characterId; delete m.characterName;
+        m.updatedAt = Date.now(); n++;
+      }
+    });
+    if (n) await saveStore(store);
+  } else {
+    const before = store.items.length;
+    store.items = store.items.filter((m) => String(m.characterId || "") !== target);
+    n = before - store.items.length;
+    if (n) await saveStore(store);
+  }
+  settings.characterRegistry = (settings.characterRegistry || []).filter((c) => c.id !== target);
+  await saveSettings(settings);
+  return wrapResult(true, keepMemories ? `角色已移除，${n} 条记忆转为全局` : `角色已移除，删除 ${n} 条记忆`, { affected: n });
+}
+
+/** 以某角色身份预览注入文本（用于验证隔离是否生效） */
+export async function ipcCharacterPreview(characterId: string): Promise<ToolResult> {
+  const store = await loadStore();
+  const settings = await loadSettings();
+  const text = buildInjection(store, settings, Number(settings.injectBudgetChars) || 1200, undefined, String(characterId || ""));
+  return wrapResult(true, "注入预览", { characterId: String(characterId || ""), text, length: text.length });
 }
 
 export async function ipcAutoExtract(text: string, chatId?: string): Promise<ToolResult> {

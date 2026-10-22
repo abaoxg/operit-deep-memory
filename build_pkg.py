@@ -18,7 +18,7 @@ import zipfile
 WORK = "/sdcard/dm_work2"
 OUT_DIR = "/sdcard/dm_out"
 PKG_ID = "com.operit.deep_memory"
-VERSION = "1.1.3"
+VERSION = "1.2.0"
 
 NAV_SURFACE_WHITELIST = {
     "toolbox", "TOOLBOX",
@@ -44,6 +44,7 @@ FILES = [
     "test_injection.js",
     "test_integration.js",
     "test_e2e.js",
+    "test_character.js",
 ]
 
 

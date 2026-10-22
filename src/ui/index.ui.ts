@@ -34,6 +34,8 @@ interface UiMemory {
   links?: string[];
   imagePath?: string;
   chatId?: string;
+  characterId?: string;
+  characterName?: string;
 }
 
 function typeLabel(type: string): string {
@@ -89,7 +91,7 @@ async function dmIpc(channel: string, payload?: Record<string, unknown>): Promis
 
 function memoryText(ctx: ComposeDslContext, m: UiMemory): ComposeNode {
   const tags = (m.tags || []).slice(0, 4).join(" #");
-  const first = `${typeLabel(m.type)} · ${stars(m.importance)}${m.pinned ? " · 置顶" : ""}${m.imagePath ? " · 🖼️图片" : ""}${m.chatId ? " · 单独记忆" : ""}`;
+  const first = `${typeLabel(m.type)} · ${stars(m.importance)}${m.pinned ? " · 置顶" : ""}${m.imagePath ? " · 🖼️图片" : ""}${m.chatId ? " · 单独记忆" : ""}${m.characterId ? ` · 角色:${m.characterName || m.characterId}` : ""}`;
   const second = (m.updatedAtText || "") + (tags ? "  #" + tags : "");
   return ctx.UI.Column({ spacing: 2 }, [
     ctx.UI.Text({ text: (m.imagePath ? "🖼️ " : "") + m.content, style: "bodyMedium", color: INK, maxLines: 4 }),
@@ -268,6 +270,18 @@ function settingsText(ctx: ComposeDslContext, s: any, setS: (patch: Record<strin
     toggleRow("过期记忆自动清理", "autoCleanExpired"),
     numberRow("过期清理保留天数", "expiredCleanDays"),
     divider(ctx),
+    ctx.UI.Text({ text: "角色主线（v1.2.0）", style: "titleSmall", fontWeight: "bold", color: INK }),
+    toggleRow("角色记忆隔离（角色只看自己的+全局）", "characterIsolation"),
+    toggleRow("角色可见全局记忆", "injectGlobalMemory"),
+    toggleRow("角色可见自己的记忆", "injectCharacterMemory"),
+    toggleRow("自动给新记忆打角色标记", "characterAutoTag"),
+    toggleRow("识别到角色时降级为全局注入", "characterFallbackGlobal"),
+    ctx.UI.Text({
+      text: "关闭隔离 = 所有记忆对所有角色可见（旧行为），旧数据不受影响。",
+      style: "labelSmall",
+      color: INK_FAINT
+    }),
+    divider(ctx),
     numberRow("注入条数", "injectCount"),
     numberRow("首次复习间隔(天)", "reviewBaseDays"),
     numberRow("间隔增长倍数", "reviewGrowth"),
@@ -318,9 +332,109 @@ function settingsText(ctx: ComposeDslContext, s: any, setS: (patch: Record<strin
   ]);
 }
 
+/* ---------------- 角色主线（v1.2.0）----------------
+   说明：角色隔离只是过滤条件，不改数据格式——旧数据无 characterId 即视为全局记忆。
+   所以这一页的作用是「让人看见隔离在生效」，而不是必须来配置。 */
+
+function characterText(
+  ctx: ComposeDslContext,
+  data: any,
+  preview: string,
+  busy: boolean,
+  input: { newId: string; newName: string; memId: string; charId: string },
+  setInput: (patch: Record<string, string>) => void,
+  onRegister: () => void,
+  onPreview: (id: string) => void,
+  onMigrateGlobal: (id: string) => void,
+  onForget: (id: string) => void,
+  onAssign: () => void,
+  onRefresh: () => void
+): ComposeNode {
+  const d = data || {};
+  const chars: any[] = Array.isArray(d.characters) ? d.characters : [];
+  const globalCount = typeof d.globalCount === "number" ? d.globalCount : 0;
+  const isolation = d.isolation !== false;
+
+  const field = (label: string, value: string, onChange: (v: string) => void): ComposeNode =>
+    ctx.UI.Row({ verticalAlignment: "center", spacing: 8 }, [
+      ctx.UI.Text({ text: label, style: "bodyMedium", color: INK, maxLines: 1 }),
+      ctx.UI.TextField({
+        value: String(value || ""),
+        onValueChange: onChange,
+        singleLine: true,
+        weight: 1,
+        supportingText: ctx.UI.Text({ text: "", style: "labelSmall", color: "#00000000" })
+      })
+    ]);
+
+  const rows: ComposeNode[] = [];
+  chars.forEach((c) => {
+    const id = String(c.id || "");
+    rows.push(ctx.UI.Column({ spacing: 4 }, [
+      ctx.UI.Text({ text: `${c.name || id} · ${c.count} 条`, style: "bodyMedium", color: INK, maxLines: 1 }),
+      ctx.UI.Text({ text: `id: ${id}`, style: "labelSmall", color: INK_FAINT, maxLines: 1 }),
+      ctx.UI.Row({ spacing: 6 }, [
+        ctx.UI.Button({ text: "预览", weight: 1, contentPadding: { horizontal: 2, vertical: 4 }, onClick: () => onPreview(id) }),
+        ctx.UI.Button({ text: "转全局", weight: 1, contentPadding: { horizontal: 2, vertical: 4 }, onClick: () => onMigrateGlobal(id) }),
+        ctx.UI.Button({ text: "移除", weight: 1, contentPadding: { horizontal: 2, vertical: 4 }, onClick: () => onForget(id) })
+      ]),
+      divider(ctx)
+    ]));
+  });
+
+  return ctx.UI.Column({ spacing: 8 }, [
+    ctx.UI.Text({ text: "角色主线", style: "titleMedium", fontWeight: "bold", color: INK }),
+    ctx.UI.Text({
+      text: `隔离：${isolation ? "已开启" : "已关闭"} · 角色 ${chars.length} 个 · 全局记忆 ${globalCount} 条`,
+      style: "labelSmall",
+      color: INK_SOFT
+    }),
+    ctx.UI.Text({
+      text: isolation
+        ? "角色只会看到自己的记忆 + 全局记忆，其他角色的记忆对它不可见。"
+        : "隔离已关闭，所有记忆对所有角色可见（旧行为）。",
+      style: "labelSmall",
+      color: INK_FAINT
+    }),
+    divider(ctx),
+
+    ctx.UI.Text({ text: "登记角色（可只填 id）", style: "titleSmall", fontWeight: "bold", color: INK }),
+    field("角色 id", input.newId, (v: string) => setInput({ newId: v })),
+    field("显示名", input.newName, (v: string) => setInput({ newName: v })),
+    ctx.UI.Button({ text: "登记 / 重命名", onClick: onRegister }),
+    divider(ctx),
+
+    ctx.UI.Text({ text: "角色列表", style: "titleSmall", fontWeight: "bold", color: INK }),
+    chars.length
+      ? ctx.UI.Column({ spacing: 8 }, rows)
+      : ctx.UI.Text({ text: "还没有角色。角色会在你与该角色对话时自动登记；也可以在上面手动登记。", style: "labelSmall", color: INK_FAINT }),
+    ctx.UI.Button({ text: busy ? "刷新中…" : "刷新", onClick: onRefresh }),
+    divider(ctx),
+
+    ctx.UI.Text({ text: "单条记忆改归属", style: "titleSmall", fontWeight: "bold", color: INK }),
+    field("记忆 id", input.memId, (v: string) => setInput({ memId: v })),
+    field("目标角色 id（留空=转全局）", input.charId, (v: string) => setInput({ charId: v })),
+    ctx.UI.Button({ text: "改归属", onClick: onAssign }),
+
+    preview
+      ? ctx.UI.Column({ spacing: 4 }, [
+          divider(ctx),
+          ctx.UI.Text({ text: "注入预览", style: "titleSmall", fontWeight: "bold", color: INK }),
+          ctx.UI.Text({ text: preview, style: "labelSmall", color: INK_SOFT, maxLines: 40 })
+        ])
+      : ctx.UI.Text({ text: "", style: "labelSmall", color: "#00000000" }),
+
+    ctx.UI.Text({
+      text: "提示：「预览」显示该角色实际会被注入的记忆文本——如果它只出现自己的记忆和全局记忆，说明隔离生效。",
+      style: "labelSmall",
+      color: INK_FAINT
+    })
+  ]);
+}
+
 /* ---------------- 主屏 ---------------- */
 
-const TABS = ["总览", "搜索", "时间线", "图谱", "复习", "设置"];
+const TABS = ["总览", "角色", "搜索", "时间线", "图谱", "复习", "设置"];
 /* P10：模块级「已启动」标记，保证刷新只真正跑一次 */
 let __dmBooted = false;
 
@@ -337,6 +451,10 @@ function screen(ctx: ComposeDslContext): ComposeNode {
   const [busy, setBusy] = ctx.useState<boolean>("dm_busy", false);
   const [loaded, setLoaded] = ctx.useState<boolean>("dm_loaded", false);
   const [loadErr, setLoadErr] = ctx.useState<string>("dm_load_err", "");
+  /* 角色主线状态 */
+  const [charData, setCharData] = ctx.useState<any>("dm_char_data", null);
+  const [charPreview, setCharPreview] = ctx.useState<string>("dm_char_preview", "");
+  const [charForm, setCharForm] = ctx.useState<any>("dm_char_form", { newId: "", newName: "", memId: "", charId: "" });
 
   function unwrapResult(r: any): any {
     if (r && r.data !== undefined && r.data !== null) return r.data;
@@ -394,6 +512,8 @@ function screen(ctx: ComposeDslContext): ComposeNode {
       if (r && Array.isArray(r.items)) { setDue(r.items); ok++; }
       const st = await callIpc("memory.settings.get");
       if (st) { setSettings(st); ok++; }
+      const cd = await callIpc("memory.character_list");
+      if (cd) { setCharData(cd); ok++; }
     } catch (e: any) {
       __dmLastErr = "refreshAll: " + String((e && e.message) ? e.message : e);
     }
@@ -435,12 +555,61 @@ function screen(ctx: ComposeDslContext): ComposeNode {
     if (sug && Array.isArray(sug)) setSuggestions(sug);
   }
 
+  /* ---------- 角色主线动作 ---------- */
+  async function loadCharacters(): Promise<void> {
+    const d = await callIpc("memory.character_list");
+    if (d) setCharData(d);
+  }
+  function patchForm(patch: Record<string, string>): void {
+    setCharForm({ ...(charForm || {}), ...patch });
+  }
+  async function charRegister(): Promise<void> {
+    const f = charForm || {};
+    const id = String(f.newId || "").trim();
+    if (!id) { ctx.showToast("先填角色 id"); return; }
+    const r = await callIpc("memory.character_register", { id, name: String(f.newName || "").trim() || id });
+    ctx.showToast((r && r.message) ? String(r.message) : "已登记");
+    patchForm({ newId: "", newName: "" });
+    await loadCharacters();
+  }
+  async function charPreviewShow(id: string): Promise<void> {
+    const d = await callIpc("memory.character_preview", { characterId: id });
+    const txt = d && typeof d.text === "string" ? d.text : "";
+    setCharPreview(txt ? txt : "（该角色当前没有可注入的记忆）");
+  }
+  async function charMigrateGlobal(id: string): Promise<void> {
+    const r = await callIpc("memory.character_migrate", { fromId: id, toId: "" });
+    ctx.showToast((r && r.message) ? String(r.message) : "已转全局");
+    await loadCharacters();
+    await refreshAll();
+  }
+  async function charForget(id: string): Promise<void> {
+    /* 默认保留记忆、只解除归属——删除是不可逆的，不能在按钮上默认做 */
+    const r = await callIpc("memory.character_forget", { id, keepMemories: true });
+    ctx.showToast((r && r.message) ? String(r.message) : "已移除角色");
+    await loadCharacters();
+    await refreshAll();
+  }
+  async function charAssign(): Promise<void> {
+    const f = charForm || {};
+    const memId = String(f.memId || "").trim();
+    if (!memId) { ctx.showToast("先填记忆 id"); return; }
+    const cid = String(f.charId || "").trim();
+    const r = await callIpc("memory.character_assign", { memoryId: memId, characterId: cid, characterName: cid });
+    ctx.showToast((r && r.message) ? String(r.message) : "已改归属");
+    patchForm({ memId: "", charId: "" });
+    await refreshAll();
+  }
+
   const linkedItems = center
     ? (allItems || []).filter((m: UiMemory) => (center.links || []).includes(m.id))
     : [];
 
   function contentNode(): ComposeNode {
     switch (tab) {
+      case "角色":
+        return characterText(ctx, charData, charPreview, busy, charForm || { newId: "", newName: "", memId: "", charId: "" }, patchForm,
+          charRegister, charPreviewShow, charMigrateGlobal, charForget, charAssign, loadCharacters);
       case "搜索":
         return searchText(ctx, q, setQ, searchResult, busy, doSearch);
       case "时间线":

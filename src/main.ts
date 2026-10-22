@@ -26,6 +26,13 @@ globalThis.__DM_BRIDGE__ = {
     "memory.injection_preview": () => deep_memory_1.ipcInjectionPreview(),
     "memory.report": (p) => deep_memory_1.ipcReport(p && p.space, p && p.days),
     "memory.conflicts": (p) => deep_memory_1.ipcConflicts(!!(p && p.clear === true)),
+    /* 角色主线：注册表 / 归属 / 迁移 / 遗忘 / 预演 */
+    "memory.character_list": () => deep_memory_1.ipcCharacterList(),
+    "memory.character_register": (p) => deep_memory_1.ipcCharacterRegister(String((p && p.id) || ""), String((p && p.name) || "")),
+    "memory.character_assign": (p) => deep_memory_1.ipcCharacterAssign(String((p && p.memoryId) || ""), String((p && p.characterId) || ""), p && p.characterName ? String(p.characterName) : undefined),
+    "memory.character_migrate": (p) => deep_memory_1.ipcCharacterMigrate(String((p && p.fromId) || ""), String((p && p.toId) || ""), p && p.toName ? String(p.toName) : undefined),
+    "memory.character_forget": (p) => deep_memory_1.ipcCharacterForget(String((p && p.id) || ""), !(p && p.keepMemories === false)),
+    "memory.character_preview": (p) => deep_memory_1.ipcCharacterPreview(String((p && p.characterId) || "")),
     "memory.extract": (p) => deep_memory_1.ipcAutoExtract(p && p.text),
     "memory.ai_status": () => ai_extract_1.aiStatus(),
     "memory.ai_probe": () => ai_extract_1.aiProbe(),
@@ -119,6 +126,30 @@ ToolPkg.ipc.on("memory.conflicts", async (payload) => {
     const p = payload || {};
     return (0, deep_memory_1.ipcConflicts)(p.clear === true);
 });
+/* ---------- 角色主线 IPC ---------- */
+ToolPkg.ipc.on("memory.character_list", async () => {
+    return (0, deep_memory_1.ipcCharacterList)();
+});
+ToolPkg.ipc.on("memory.character_register", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterRegister)(String(p.id || ""), String(p.name || ""));
+});
+ToolPkg.ipc.on("memory.character_assign", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterAssign)(String(p.memoryId || ""), String(p.characterId || ""), p.characterName ? String(p.characterName) : undefined);
+});
+ToolPkg.ipc.on("memory.character_migrate", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterMigrate)(String(p.fromId || ""), String(p.toId || ""), p.toName ? String(p.toName) : undefined);
+});
+ToolPkg.ipc.on("memory.character_forget", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterForget)(String(p.id || ""), p.keepMemories !== false);
+});
+ToolPkg.ipc.on("memory.character_preview", async (payload) => {
+    const p = payload || {};
+    return (0, deep_memory_1.ipcCharacterPreview)(String(p.characterId || ""));
+});
 ToolPkg.ipc.on("memory.extract", async (payload) => {
     const p = payload || {};
     if (!p.text)
@@ -192,21 +223,37 @@ async function composeSystemPrompt(event) {
         if (!settings.autoInject || store.items.length === 0)
             return null;
         const chatId = event && event.eventPayload ? String(event.eventPayload.chatId || "") : "";
+        // 角色主线：从 event 里解析当前角色（多层兜底），拿不到就是 ""（全局域）
+        const who = (0, memory_core_1.resolveCharacterId)(event);
+        let characterId = who.id;
+        // 热路径写回角色注册表（只在真有角色且确实有变化时才落盘，避免每轮都写）
+        if (characterId && settings.characterAutoTag !== false) {
+            try {
+                if ((0, memory_core_1.touchCharacterRegistry)(settings, who.id, who.name)) {
+                    await (0, memory_core_1.saveSettings)(settings);
+                }
+            }
+            catch (e) { }
+        }
+        // 拿不到角色时的兜底策略：降级全局（true）或什么都不注入（false）
+        if (!characterId && settings.characterFallbackGlobal === false && settings.characterIsolation) {
+            return null;
+        }
         // 缓存友好：hash 未变则复用缓存文本（前缀缓存命中→省钱）；关闭则实时构建
         if (settings.cacheFriendly !== false) {
-            const hash = (0, memory_core_1.injectionCacheHash)(store, settings, chatId);
+            const hash = (0, memory_core_1.injectionCacheHash)(store, settings, chatId, characterId);
             const cached = await (0, memory_core_1.loadInjectionCache)();
             if (cached && cached.hash === hash && cached.text) {
                 return { systemPrompt: cached.text };
             }
-            const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId);
+            const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId, characterId);
             if (injection) {
                 await (0, memory_core_1.saveInjectionCache)(hash, injection);
                 return { systemPrompt: injection };
             }
             return null;
         }
-        const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId);
+        const injection = (0, memory_core_1.buildInjection)(store, settings, Number(settings.injectBudgetChars) || 1200, chatId, characterId);
         if (!injection)
             return null;
         return { systemPrompt: injection };
@@ -241,7 +288,7 @@ function dmSeen(key) {
 }
 
 /** 统一处理入口：AI 判定 → 写入；失败自动降级正则 */
-function dmHandleContent(content, chatId, source) {
+function dmHandleContent(content, chatId, source, characterId, characterName) {
     (async () => {
         try {
             const settings = await memory_core_1.loadSettings();
@@ -249,9 +296,9 @@ function dmHandleContent(content, chatId, source) {
                 dmLog(source + " 自动记忆已关闭(settings.autoExtract=false)");
                 return;
             }
-            const r = await ai_extract_1.aiExtractText(content, chatId);
+            const r = await ai_extract_1.aiExtractText(content, chatId, characterId, characterName);
             const by = r && r.data ? String(r.data.by || "") : "";
-            dmLog(source + " 处理完成 by=" + (by || "?") + " msg=" + String(r && r.message || "").slice(0, 100));
+            dmLog(source + " 处理完成 by=" + (by || "?") + " 角色=" + String(characterId || "全局").slice(0, 8) + " msg=" + String(r && r.message || "").slice(0, 100));
         }
         catch (e) {
             dmLog(source + " 异常: " + String(e && e.message || e));
@@ -270,7 +317,8 @@ function onMessageProcessing(event) {
         dmLog("msgproc 触发 probeOnly=" + String(p.probeOnly) + " chat=" + chatId.slice(0, 8) + " len=" + content.length);
         if (p.probeOnly === true) { dmLog("msgproc probeOnly=true 跳过"); return; }
         if (dmSeen(chatId + "|" + content)) { dmLog("msgproc 重复消息跳过"); return; }
-        dmHandleContent(content, chatId, "msgproc");
+        const who = memory_core_1.resolveCharacterId(event);
+        dmHandleContent(content, chatId, "msgproc", who.id, who.name);
     }
     catch (e) {
         dmLog("msgproc 外层异常: " + String(e && e.message || e));
@@ -296,7 +344,8 @@ function onChatMessagePersisted(event) {
             return;
         }
         if (dmSeen(chatId + "|" + content)) { dmLog("chatmsg 重复消息跳过"); return; }
-        dmHandleContent(content, chatId, "chatmsg");
+        const who = memory_core_1.resolveCharacterId(event);
+        dmHandleContent(content, chatId, "chatmsg", who.id, who.name);
     }
     catch (e) {
         dmLog("chatmsg 外层异常: " + String(e && e.message || e));
@@ -359,4 +408,3 @@ export {
     onMessageProcessing,
     onChatMessagePersisted
 };
-

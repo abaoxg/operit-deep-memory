@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.deep_memory",
-  "version": "1.1.3",
+  "version": "1.2.0",
   "api_version": "1.0.1",
   "main": "dist/main.js",
   "display_name": {
@@ -9,8 +9,8 @@
     "en": "Deep Memory"
   },
   "description": {
-    "zh": "六边形长期记忆插件 · v1.1.0 AI 智能版：由当前对话模型语义判断哪些信息值得长期记住（不再依赖固定句式），支持类型/重要性/敏感/空间自动判定、冲突检测、艾宾浩斯复习、注入预算优化与液态玻璃管理面板。零外部依赖，无需 API Key。",
-    "en": "Hexagon long-term memory plugin v1.1.0 with AI judgement: the current chat model decides what is worth remembering (no fixed regex needed), with auto type/importance/sensitive/space tagging, conflict detection, Ebbinghaus review, injection budget tuning and a liquid-glass panel. No external API key required."
+    "zh": "六边形长期记忆插件 · v1.2.0 角色主线版：AI 语义判定 + 角色记忆隔离（每个角色只看到自己的记忆与全局记忆，互不串味），支持类型/重要性/敏感/空间/角色自动判定、冲突检测、艾宾浩斯复习、注入预算优化与液态玻璃管理面板。零外部依赖，无需 API Key。",
+    "en": "Hexagon long-term memory plugin v1.2.0 with character lanes: AI decides what is worth remembering, and each character only sees its own memories plus global ones. Auto type/importance/sensitive/space/character tagging, conflict detection, Ebbinghaus review, injection budget tuning and a liquid-glass panel. No external API key required."
   },
   "enabled_by_default": true,
   "subpackages": [
