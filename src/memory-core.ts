@@ -1,0 +1,1450 @@
+/**
+ * Deep Memory - memory core
+ * 六边形长期记忆核心：存储 / 遗忘曲线 / 标签引擎 / 检索打分 / 关联 / 统计
+ * 纯逻辑 + Tools.Files IO，可被 main / sandbox 工具 / UI 共用。
+ */
+
+export const PLUGIN_ID = "com.operit.deep_memory";
+export const DATA_DIR = `/sdcard/Download/Operit/plugins/${PLUGIN_ID}`;
+export const MEMORY_FILE = `${DATA_DIR}/memories.json`;
+export const SETTINGS_FILE = `${DATA_DIR}/settings.json`;
+export const IMAGES_DIR = `${DATA_DIR}/images`;
+export const EXPORT_DIR = `/sdcard/Download/Operit/export/${PLUGIN_ID}`;
+export const MAX_MEMORIES = 100000; // 存储无硬上限（受物理空间限制）
+export const MAX_LINKS_PER_MEMORY = 64;
+export const DEFAULT_IMPORTANCE = 3;
+
+/* ---------------- 类型定义 ---------------- */
+
+export type MemoryType = "fact" | "preference" | "event" | "relation" | "idea" | "task";
+
+export const MEMORY_TYPES: { key: MemoryType; labelZh: string; labelEn: string; emoji: string; colorA: string; colorB: string }[] = [
+  { key: "fact", labelZh: "事实", labelEn: "Fact", emoji: "📌", colorA: "#4FC3F7", colorB: "#0288D1" },
+  { key: "preference", labelZh: "偏好", labelEn: "Preference", emoji: "❤️", colorA: "#F06292", colorB: "#C2185B" },
+  { key: "event", labelZh: "事件", labelEn: "Event", emoji: "🗓️", colorA: "#FFB74D", colorB: "#E65100" },
+  { key: "relation", labelZh: "关系", labelEn: "Relation", emoji: "🔗", colorA: "#BA68C8", colorB: "#6A1B9A" },
+  { key: "idea", labelZh: "想法", labelEn: "Idea", emoji: "💡", colorA: "#AED581", colorB: "#33691E" },
+  { key: "task", labelZh: "任务", labelEn: "Task", emoji: "✅", colorA: "#4DB6AC", colorB: "#00695C" }
+];
+
+export const TYPE_MAP: Record<string, { key: MemoryType; labelZh: string; labelEn: string; emoji: string; colorA: string; colorB: string }> = {};
+MEMORY_TYPES.forEach((t) => { TYPE_MAP[t.key] = t; });
+
+export interface MemoryItem {
+  id: string;
+  type: MemoryType;
+  content: string;
+  tags: string[];
+  importance: number;      // 1-5
+  source: string;          // chat / user / ai / manual / ui / import / auto
+  createdAt: number;
+  updatedAt: number;
+  lastAccessAt: number;
+  accessCount: number;
+  reviewCount: number;
+  lastReviewedAt: number;
+  nextReviewAt: number;    // 遗忘曲线：到期时间
+  links: string[];         // 关联记忆 id
+  space: string;           // 记忆空间：general / 工作 / 生活 / 学习 ...
+  chatId?: string;         // 单独记忆：仅该对话框可见；空=通用记忆（全局共享）
+  sensitive?: boolean;     // 敏感内容加密存储
+  imagePath?: string;      // 关联图片（记忆目录内相对路径 images/<id>.ext），空=无图
+  expiryAt?: number;       // 可选过期时间
+  pinned?: boolean;        // 置顶
+}
+
+export interface MemorySettings {
+  autoInject: boolean;             // 是否把高价值记忆注入系统提示词
+  injectCount: number;             // 每次注入条数（默认 5）
+  injectIncludeDue: boolean;       // 注入时是否包含到期复习项
+  reviewEnabled: boolean;          // 是否启用遗忘曲线
+  reviewBaseDays: number;          // 首次复习间隔天数（默认 1）
+  reviewGrowth: number;            // 间隔增长倍数（默认 2）
+  defaultImportance: number;       // 默认重要性
+  autoTag: boolean;                // 自动提取标签
+  autoLink: boolean;               // 自动建议关联
+  autoExtract: boolean;            // 对话中自动提取记忆（"记住/我叫/我喜欢"等句式）
+  conflictCheck: boolean;          // 新记忆与旧记忆冲突检测
+  dueRemind: boolean;              // 注入时标注到期/过期任务提醒
+  spaces: string[];                // 记忆空间列表
+  activeSpace: string;             // 当前激活空间
+  encryptKey: string;              // 敏感记忆加密密钥（空=不启用加密）
+  autoBackup: boolean;             // 每次写入自动备份
+  embedEnabled: boolean;           // 语义检索（Embedding API）
+  embedEndpoint: string;           // 如 https://api.openai.com/v1/embeddings
+  embedKey: string;
+  embedModel: string;
+  /* 省钱引擎 */
+  compactInject: boolean;          // 注入压缩（条数/长度/标签精简）
+  cacheFriendly: boolean;          // 缓存友好注入（文本稳定 + 缓存文件复用，配合前缀缓存省钱）
+  hotColdSplit: boolean;           // 冷热分级（热记忆全量 + 冷记忆标题行）
+  /* 记忆注入范围：通用记忆(全局共享) + 单独记忆(仅当前对话框) 组合 */
+  injectGeneral: boolean;          // 注入通用记忆（全部全局记忆可见）
+  injectSpace: boolean;            // 注入单独记忆（仅当前对话框的记忆）
+  autoExtractChat: boolean;        // 自动提取的记忆存入单独记忆（仅当前对话框），关=存通用记忆
+  /* 好用增强 */
+  autoCleanExpired: boolean;       // 过期记忆自动清理
+  expiredCleanDays: number;        // 过期多少天后清理（默认 7）
+  birthdayRemind: boolean;         // 重要日期（生日/纪念日）提前提醒
+  quickForget: boolean;            // 快捷遗忘（"忘了关于X的事"自动删除）
+  /* ---- AI 智能记忆（v1.1.0 新增）---- */
+  aiExtract: boolean;              // 由宿主模型语义判断该不该记（替代固定正则）
+  aiExtractType: string;           // 主通道 functionType（MEMORY）
+  aiExtractFallbackType: string;   // 降级通道 functionType（CHAT）
+  aiExtractThinking: boolean;      // 调用时是否启用思考
+  aiExtractRecordUsage: boolean;   // 是否记录 token 用量
+  aiExtractMinLen: number;         // 触发 AI 判定的最短消息长度
+  aiExtractMaxPerHour: number;     // 每小时最多调用次数
+  aiExtractMaxItems: number;       // 单条消息最多提取条数
+  /* 注入预算 */
+  injectPinnedAlways: boolean;     // 置顶记忆常驻注入
+  injectBudgetChars: number;       // 注入字符预算
+}
+
+export const DEFAULT_SETTINGS: MemorySettings = {
+  autoInject: true,
+  injectCount: 3,
+  injectIncludeDue: true,
+  reviewEnabled: true,
+  reviewBaseDays: 1,
+  reviewGrowth: 2,
+  defaultImportance: 3,
+  autoTag: true,
+  autoLink: true,
+  autoExtract: true,
+  conflictCheck: true,
+  dueRemind: true,
+  spaces: ["general", "工作", "生活", "学习"],
+  activeSpace: "general",
+  encryptKey: "",
+  autoBackup: true,
+  embedEnabled: false,
+  embedEndpoint: "",
+  embedKey: "",
+  embedModel: "",
+  compactInject: true,
+  cacheFriendly: true,
+  hotColdSplit: true,
+  injectGeneral: true,
+  injectSpace: true,
+  autoExtractChat: false,
+  autoCleanExpired: true,
+  expiredCleanDays: 7,
+  birthdayRemind: true,
+  quickForget: true,
+  // ---- AI 智能记忆（v1.1.0 新增）----
+  aiExtract: true,
+  aiExtractType: "MEMORY",
+  aiExtractFallbackType: "CHAT",
+  aiExtractThinking: false,
+  aiExtractRecordUsage: false,
+  aiExtractMinLen: 6,
+  aiExtractMaxPerHour: 60,
+  aiExtractMaxItems: 3,
+  // 注入预算：pinned 常驻 + 按重要性挑选，避免记忆变多后盖不全
+  injectPinnedAlways: true,
+  injectBudgetChars: 1600
+};
+
+export interface MemoryStore {
+  version: number;
+  items: MemoryItem[];
+  updatedAt: number;
+  conflicts?: ConflictInfo[];  // 最近的记忆冲突提醒
+}
+
+/* ---------------- 基础工具 ---------------- */
+
+export function formatTime(ts: number): string {
+  try {
+    const d = new Date(ts);
+    const p = (n: number) => (n < 10 ? "0" + n : "" + n);
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  } catch (e) {
+    return "";
+  }
+}
+
+export function genId(): string {
+  return "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+/* ---------------- 敏感内容加密 ---------------- */
+
+/** 自实现 Base64（兼容 quickjs/node，无外部依赖） */
+const B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function base64Encode(input: string): string {
+  let out = "";
+  let i = 0;
+  while (i < input.length) {
+    const c1 = input.charCodeAt(i++) & 0xff;
+    const c2 = i < input.length ? input.charCodeAt(i++) & 0xff : NaN;
+    const c3 = i < input.length ? input.charCodeAt(i++) & 0xff : NaN;
+    out += B64_CHARS.charAt(c1 >> 2);
+    out += B64_CHARS.charAt(((c1 & 3) << 4) | (isNaN(c2) ? 0 : (c2 >> 4)));
+    out += isNaN(c2) ? "=" : B64_CHARS.charAt(((c2 & 15) << 2) | (isNaN(c3) ? 0 : (c3 >> 6)));
+    out += isNaN(c3) ? "=" : B64_CHARS.charAt(c3 & 63);
+  }
+  return out;
+}
+function base64Decode(input: string): string {
+  const clean = String(input).replace(/[^A-Za-z0-9+/=]/g, "");
+  let out = "";
+  let i = 0;
+  while (i + 1 < clean.length) {
+    const c1c = clean.charAt(i);
+    const c2c = clean.charAt(i + 1);
+    const c3c = clean.charAt(i + 2);
+    const c4c = clean.charAt(i + 3);
+    if (!c1c || !c2c) break;
+    const e1 = B64_CHARS.indexOf(c1c);
+    const e2 = B64_CHARS.indexOf(c2c);
+    const e3 = c3c === "=" ? 64 : B64_CHARS.indexOf(c3c);
+    const e4 = c4c === "=" ? 64 : B64_CHARS.indexOf(c4c);
+    out += String.fromCharCode((e1 << 2) | (e2 >> 4));
+    if (e3 !== 64) out += String.fromCharCode(((e2 & 15) << 4) | (e3 >> 2));
+    if (e4 !== 64) out += String.fromCharCode(((e3 & 3) << 6) | e4);
+    i += 4;
+  }
+  return out;
+}
+
+/** XOR 流加密（本地混淆级，无需外部依赖） */
+function xorCipher(text: string, key: string): string {
+  const k = key || "deep_memory";
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    out += String.fromCharCode(text.charCodeAt(i) ^ k.charCodeAt(i % k.length));
+  }
+  return out;
+}
+
+/** 尝试 CryptoJS.AES 加密（运行时存在则用），否则回退 XOR+Base64 */
+export function encryptText(plain: string, key: string): string {
+  if (!key) return plain;
+  try {
+    const aes: any = (globalThis as any).CryptoJS && (globalThis as any).CryptoJS.AES;
+    if (aes && typeof aes.encrypt === "function") {
+      return "AES:" + aes.encrypt(plain, key).toString();
+    }
+  } catch (e) {
+    // fallthrough
+  }
+  try {
+    // 先转 %XX ASCII 串再 XOR（避免中文 charCode 高位截断），再 base64
+    const b64 = base64Encode(xorCipher(encodeURIComponent(plain), key));
+    return "XOR:" + b64;
+  } catch (e) {
+    return "XOR:" + xorCipher(plain, key).split("").map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  }
+}
+
+export function decryptText(cipher: string, key: string): string {
+  if (!key || !cipher) return cipher;
+  try {
+    if (cipher.startsWith("AES:")) {
+      const aes: any = (globalThis as any).CryptoJS && (globalThis as any).CryptoJS.AES;
+      if (aes && typeof aes.decrypt === "function") {
+        const bytes = aes.decrypt(cipher.slice(4), key);
+        const text = bytes && typeof bytes.toString === "function" ? bytes.toString((globalThis as any).CryptoJS.enc.Utf8) : "";
+        return text || cipher;
+      }
+      return cipher;
+    }
+    if (cipher.startsWith("XOR:")) {
+      const raw = cipher.slice(4);
+      try {
+        const decoded = xorCipher(base64Decode(raw), key);
+        return decodeURIComponent(decoded);
+      } catch (e) {
+        const hex: string[] = (raw.match(/.{1,2}/g) || []).slice();
+        const s = hex.map((h: string) => String.fromCharCode(parseInt(h, 16))).join("");
+        return xorCipher(s, key);
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return cipher;
+}
+
+/* ---------------- 自动记忆提取（句式解析） ---------------- */
+
+export interface ExtractIntent {
+  content: string;
+  type: MemoryType;
+  importance: number;
+  sensitive: boolean;
+  kind?: "remember" | "forget"; // remember=写入；forget=删除（快捷遗忘）
+}
+
+const EXTRACT_PATTERNS: { re: RegExp; type: MemoryType; importance: number; sensitive: boolean; kind?: "remember" | "forget" }[] = [
+  { re: /(?:请记住|记住|别忘了|记一下)[:：，,]?\s*(.+)/, type: "fact", importance: 4, sensitive: false },
+  { re: /(?:我叫|我是|我的名字(?:是|叫))\s*(.+)/, type: "fact", importance: 5, sensitive: false },
+  { re: /(?:我(?:的)?生日(?:是|在))\s*(.+)/, type: "fact", importance: 5, sensitive: false },
+  { re: /(?:我(?:的)?(?:地址|住址)(?:是|在))\s*(.+)/, type: "fact", importance: 4, sensitive: true },
+  { re: /(?:我(?:的)?(?:手机号|电话|号码|微信号|微信|qq|邮箱|email)(?:是|为))\s*(.+)/, type: "fact", importance: 5, sensitive: true },
+  { re: /(?:我(?:的)?(?:身份证|证件号|卡号|密码|账号)(?:是|为))\s*(.+)/, type: "fact", importance: 5, sensitive: true },
+  { re: /(?:我(?:的)?(?:公司|工作|职业|职位|单位)(?:是|在))\s*(.+)/, type: "fact", importance: 4, sensitive: false },
+  { re: /(?:我(?:的)?(?:学校|专业|班级|学历)(?:是|在))\s*(.+)/, type: "fact", importance: 4, sensitive: false },
+  { re: /(?:我喜欢|我热爱|我最喜欢|我爱)\s*(.+)/, type: "preference", importance: 4, sensitive: false },
+  { re: /(?:我不喜欢|我讨厌|我反感)\s*(.+)/, type: "preference", importance: 4, sensitive: false },
+  { re: /(?:我(?:的)?习惯是|我习惯)\s*(.+)/, type: "preference", importance: 3, sensitive: false },
+  { re: /(?:下周|明天|后天|本周|这个月|月底|年底|截止|deadline|ddl)[^，。！？]*?(?:要|需|得|必须|记得)?\s*(?:交|完成|做|提交|发|写|去)\s*(.+)/, type: "task", importance: 4, sensitive: false },
+  { re: /(?:任务|待办|事项|计划|安排)[:：]?\s*(.+)/, type: "task", importance: 3, sensitive: false },
+  { re: /(?:我和|我认识|我的(?:朋友|同事|家人|对象|老婆|老公|儿子|女儿|孩子|亲戚))\s*(.+)/, type: "relation", importance: 4, sensitive: false },
+  { re: /(?:我的想法是|我觉得|我认为|我想)\s*(.+)/, type: "idea", importance: 3, sensitive: false },
+  { re: /(?:忘了|忘掉|删除|移除|不记得|不需要|删掉)[:：，,]?\s*(?:关于|这条|这些)?\s*(.+)/, type: "fact", importance: 3, sensitive: false, kind: "forget" }
+];
+
+/** 从用户消息中解析记忆意图（含快捷遗忘）；无命中返回 null */
+export function extractMemoryIntent(text: string): ExtractIntent | null {
+  const t = String(text || "").trim();
+  if (!t || t.length > 2000) return null;
+  for (const p of EXTRACT_PATTERNS) {
+    const m = t.match(p.re);
+    if (m && m[1] && m[1].trim().length >= 2) {
+      const content = m[1].trim();
+      if (content.length < 4 && p.kind !== "forget") continue;
+      // 内容含敏感词 → 自动标记敏感
+      const sensitive = p.sensitive || /(地址|住址|手机号|电话|号码|微信号|微信|qq|邮箱|email|身份证|证件号|卡号|密码|账号|银行卡)/.test(content);
+      return {
+        content,
+        type: p.type,
+        importance: p.importance,
+        sensitive,
+        kind: p.kind
+      };
+    }
+  }
+  return null;
+}
+
+/* ---------------- 冲突检测 ---------------- */
+
+export interface ConflictInfo {
+  existingId: string;
+  existingContent: string;
+  newContent: string;
+  field: string;
+  at: number;
+}
+
+/** 同主题关键值冲突检测：token 重叠度高但数字/日期等关键值不同 */
+export function conflictDetect(store: MemoryStore, content: string): ConflictInfo[] {
+  const out: ConflictInfo[] = [];
+  const newNums: string[] = (content.match(/(\d{2,4})/g) || []).slice();
+  if (!newNums.length) return out;
+  const newTokens = new Set(tokenize(content));
+  for (const old of store.items) {
+    const overlap = newTokens.size ? Array.from(newTokens).filter((tk) => old.content.toLowerCase().includes(tk)).length / Math.min(newTokens.size, tokenize(old.content).length || 1) : 0;
+    if (overlap < 0.5) continue;
+    const oldNums: string[] = (old.content.match(/(\d{2,4})/g) || []).slice();
+    if (!oldNums.length) continue;
+    const differs = oldNums.some((n) => !newNums.includes(n));
+    if (differs) {
+      out.push({ existingId: old.id, existingContent: old.content.slice(0, 120), newContent: content.slice(0, 120), field: oldNums.join("/"), at: Date.now() });
+    }
+  }
+  return out.slice(0, 5);
+}
+
+/* ---------------- 记忆报告 ---------------- */
+
+export function buildReport(store: MemoryStore, settings: MemorySettings, space?: string, days?: number): string {
+  const now = Date.now();
+  const items = store.items.filter((m) => {
+    if (space && m.space !== space) return false;
+    if (typeof days === "number" && days > 0 && m.createdAt < now - days * 86400000) return false;
+    return true;
+  });
+  const stats = buildStats({ ...store, items }, settings);
+  const L: string[] = [];
+  L.push("# 深度记忆报告");
+  L.push("");
+  L.push(`生成时间：${formatTime(now)}`);
+  L.push(`范围：${space || "全部空间"}${typeof days === "number" && days > 0 ? " / 最近 " + days + " 天" : " / 全部时间"}`);
+  L.push("");
+  L.push(`## 概览`);
+  L.push(`共 ${items.length} 条记忆，今日新增 ${stats.todayAdded}，本周新增 ${stats.weekAdded}，待复习 ${stats.dueReview}，平均健康度 ${stats.avgHealth}/100。`);
+  L.push("");
+  L.push(`## 类型分布`);
+  stats.typeDist.filter((d) => d.count > 0).forEach((d) => L.push(`- ${d.label}：${d.count} 条`));
+  L.push("");
+  L.push(`## 热门标签`);
+  stats.tagCloud.slice(0, 15).forEach((t) => L.push(`- #${t.tag}（${t.count}）`));
+  L.push("");
+  L.push(`## 记忆列表（按时间倒序）`);
+  sortItems(items, "time").forEach((m) => {
+    const t = TYPE_MAP[m.type] || TYPE_MAP["fact"];
+    L.push(`- [${t.labelZh}|★${m.importance}|${formatTime(m.createdAt)}] ${m.content}${m.tags.length ? " #" + m.tags.slice(0, 4).join(" #") : ""}`);
+  });
+  return L.join("\n");
+}
+
+/* ---------------- 语义检索（Embedding，可选） ---------------- */
+
+function cosine(a: number[], b: number[]): number {
+  if (!a.length || a.length !== b.length) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+export async function embedTexts(texts: string[], settings: MemorySettings): Promise<number[][]> {
+  const clean = texts.map((t) => String(t).slice(0, 8000));
+  const http: any = (globalThis as any).Tools && (globalThis as any).Tools.Net;
+  if (!http || typeof http.http !== "function") throw new Error("Tools.Net unavailable");
+  const endpoint = settings.embedEndpoint || "https://api.openai.com/v1/embeddings";
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (settings.embedKey) headers["Authorization"] = "Bearer " + settings.embedKey;
+  const res = await http.http({
+    url: endpoint,
+    method: "POST",
+    headers,
+    body: { input: clean, model: settings.embedModel || "text-embedding-3-small" },
+    responseType: "json"
+  });
+  const body = res && res.body ? res.body : res;
+  const list = (body && (body.data || (body.body && body.body.data))) || [];
+  return list.map((item: any) => Array.isArray(item.embedding) ? item.embedding : []);
+}
+
+/** 语义检索重排：对候选按 embedding 余弦相似度加分 */
+export async function rerankByEmbedding(items: MemoryItem[], query: string, settings: MemorySettings): Promise<MemoryItem[]> {
+  if (!settings.embedEnabled || !query || !items.length) return items;
+  try {
+    const vecs = await embedTexts([query].concat(items.slice(0, 30).map((m) => m.content)), settings);
+    const qv = vecs[0];
+    if (!qv || !qv.length) return items;
+    const scored = items.slice(0, 30).map((m, i) => ({ m, s: cosine(qv, vecs[i + 1] || []) }));
+    scored.sort((a, b) => b.s - a.s);
+    return scored.map((x) => x.m).concat(items.slice(30));
+  } catch (e) {
+    return items;
+  }
+}
+
+export function clampImportance(v: unknown): number {
+  const n = parseInt(String(v), 10);
+  if (isNaN(n)) return DEFAULT_IMPORTANCE;
+  return Math.max(1, Math.min(5, n));
+}
+
+export function normalizeType(v?: string): MemoryType {
+  const k = String(v || "").trim().toLowerCase();
+  return (TYPE_MAP[k] ? k : "fact") as MemoryType;
+}
+
+/* ---------------- 标签引擎 ---------------- */
+
+const STOP_WORDS = new Set([
+  "一个", "这个", "那个", "什么", "怎么", "可以", "知道", "觉得", "喜欢", "我们", "你们", "他们", "自己",
+  "因为", "所以", "但是", "如果", "就是", "还是", "已经", "没有", "不要", "不会", "不能", "应该", "可能",
+  "今天", "明天", "昨天", "时候", "地方", "东西", "事情", "一下", "一些", "有点", "非常", "特别", "真的",
+  "the", "and", "that", "this", "with", "have", "from", "your", "about", "will", "would", "there"
+]);
+
+/** 双字切分时跳过的高频虚词字（避免产出"欢喝/喝冰"类噪音标签） */
+const STOP_CHARS = new Set([
+  "的", "了", "是", "在", "和", "有", "去", "喝", "吃", "欢", "喜", "爱", "会", "能", "要", "想",
+  "觉", "知", "说", "看", "玩", "还", "就", "都", "也", "很", "个", "吧", "吗", "呢", "啊", "哦",
+  "这", "那", "我", "你", "他", "她", "它", "们", "上", "下", "里", "中", "到", "对", "给", "把",
+  "被", "让", "从", "向", "于", "之", "与", "及", "或", "而", "但", "并", "又", "再", "更", "最",
+  "每", "第", "某", "各", "此", "该", "另", "别", "同", "随", "跟", "向", "朝", "往", "为", "因"
+]);
+
+/** 从文本提取候选标签：hashtag、英文词、中文双字+片段 */
+export function extractTags(content: string, existing: string[] = []): string[] {
+  const text = String(content || "");
+  const out = new Set<string>();
+  const push = (w: string) => {
+    const t = w.trim().toLowerCase();
+    if (!t || t.length < 2 || t.length > 20) return;
+    if (STOP_WORDS.has(t)) return;
+    if (/^[0-9\s.,!?;:'"()\[\]{}]+$/.test(t)) return;
+    out.add(t);
+  };
+
+  // hashtag
+  const tags = text.match(/#([\u4e00-\u9fa5a-zA-Z0-9_]{2,20})/g) || [];
+  tags.forEach((h) => push(h.replace("#", "")));
+
+  // 英文单词
+  const words = text.match(/[a-zA-Z][a-zA-Z0-9_-]{2,24}/g) || [];
+  words.forEach((w) => push(w));
+
+  // 中文：按虚词切分成短语，只保留 2-8 字的名词性短语
+  // （原实现按 2 字窗口暴力切分，会产出“庭路”“由器”“行脚”这类无意义碎片标签）
+  const CN_SPLIT = /[的了是和与及或但而并也都就个吧吗呢啊这那我你他她它们把被让从向于之为因每第更最又再]+/;
+  const cnChunks = text.match(/[\u4e00-\u9fa5]{2,20}/g) || [];
+  cnChunks.forEach((chunk) => {
+    chunk.split(CN_SPLIT).forEach((p) => {
+      if (p.length >= 2 && p.length <= 8) push(p);
+    });
+  });
+
+  // 数字（年份/金额/年龄等）
+  const nums = text.match(/(\d{2,4})/g) || [];
+  nums.forEach((n) => {
+    if (n.length >= 3) push(n);
+  });
+
+  // 与现有标签合并（去重），限制数量
+  existing.forEach((e) => out.add(String(e).trim().toLowerCase()));
+  const arr = Array.from(out);
+  return arr.slice(0, 30);
+}
+
+/** 标签共享数（用于关联建议） */
+function tagShared(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const setA = new Set(a.map((t) => t.toLowerCase()));
+  let hit = 0;
+  b.forEach((t) => { if (setA.has(t.toLowerCase())) hit++; });
+  return hit;
+}
+
+/* ---------------- 遗忘曲线 ---------------- */
+
+export function computeNextReview(reviewCount: number, importance: number, baseDays: number, growth: number): number {
+  const days = baseDays * Math.pow(growth, Math.min(reviewCount, 10)) * (1 + (importance - 3) * 0.3);
+  return Date.now() + Math.round(days * 86400000);
+}
+
+/** 记忆健康度 0-100：重要性 + 访问活跃 - 遗忘惩罚 */
+export function healthScore(item: MemoryItem): number {
+  const now = Date.now();
+  const ageDays = (now - item.createdAt) / 86400000;
+  const idleDays = (now - item.lastAccessAt) / 86400000;
+  let score = item.importance * 15; // 15-75
+  score += Math.min(15, item.accessCount * 0.8);
+  score -= Math.min(30, idleDays * 0.5);
+  score -= Math.min(20, Math.max(0, ageDays - 90) * 0.08);
+  if (item.pinned) score = Math.max(score, 80);
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+/** 是否到期需要复习 */
+export function isReviewDue(item: MemoryItem, settings: MemorySettings): boolean {
+  if (!settings.reviewEnabled) return false;
+  if (!item.nextReviewAt) return false;
+  return Date.now() >= item.nextReviewAt;
+}
+
+/* ---------------- 检索打分 ---------------- */
+
+export interface RecallQuery {
+  query?: string;
+  type?: string;
+  tags?: string[];
+  dateFrom?: number;
+  dateTo?: number;
+  limit?: number;
+  sortBy?: string; // relevance | time | importance | access | health
+  includeExpired?: boolean;
+  space?: string;   // 记忆空间过滤
+  allSpaces?: boolean; // true=忽略空间过滤
+  chatId?: string;  // 不传=仅通用记忆；传=通用 + 该对话框单独记忆
+  allChats?: boolean; // true=包含全部对话的单独记忆
+}
+
+function tokenize(text: string): string[] {
+  const out: string[] = [];
+  const words = text.match(/[a-zA-Z0-9][a-zA-Z0-9_-]{1,24}/g) || [];
+  words.forEach((w) => out.push(w.toLowerCase()));
+  const cnChunks = text.match(/[\u4e00-\u9fa5]{2,20}/g) || [];
+  cnChunks.forEach((chunk) => {
+    out.push(chunk);
+    if (chunk.length >= 3) {
+      for (let i = 0; i < chunk.length - 1; i++) out.push(chunk.slice(i, i + 2));
+    }
+  });
+  return out;
+}
+
+/** 相关度打分：词命中加权 + 标签加权 + 时间衰减 */
+export function scoreRelevance(item: MemoryItem, qTokens: string[], tags: string[]): number {
+  let score = 0;
+  const contentL = item.content.toLowerCase();
+  const tagL = item.tags.map((t) => t.toLowerCase());
+  qTokens.forEach((tk) => {
+    if (contentL.includes(tk)) score += 2;
+    if (tagL.some((t) => t.includes(tk) || tk.includes(t))) score += 3;
+  });
+  tags.forEach((tg) => {
+    if (tagL.includes(tg.toLowerCase())) score += 4;
+  });
+  if (score <= 0) return 0;
+  // 时间衰减：近期访问权重略高
+  const idleDays = (Date.now() - item.lastAccessAt) / 86400000;
+  const decay = Math.exp(-idleDays / 60);
+  return Math.round(score * (0.75 + 0.25 * decay) * 100) / 100;
+}
+
+export function sortItems(items: MemoryItem[], sortBy: string): MemoryItem[] {
+  const arr = items.slice();
+  switch (sortBy) {
+    case "time":
+      arr.sort((a, b) => b.updatedAt - a.updatedAt);
+      break;
+    case "importance":
+      arr.sort((a, b) => b.importance - a.importance || b.updatedAt - a.updatedAt);
+      break;
+    case "access":
+      arr.sort((a, b) => b.accessCount - a.accessCount || b.lastAccessAt - a.lastAccessAt);
+      break;
+    case "health":
+      arr.sort((a, b) => healthScore(b) - healthScore(a));
+      break;
+    case "relevance":
+    default:
+      break;
+  }
+  return arr;
+}
+
+/** 对命中记忆做一次访问记录（提高活跃度） */
+export function touchItems(items: MemoryItem[]): void {
+  const now = Date.now();
+  items.forEach((it) => {
+    it.accessCount += 1;
+    it.lastAccessAt = now;
+  });
+}
+
+/* ---------------- 存储 ---------------- */
+
+function emptyStore(): MemoryStore {
+  return { version: 1, items: [], updatedAt: Date.now() };
+}
+
+export function normalizeItem(raw: Record<string, any>): MemoryItem | null {
+  if (!raw || typeof raw !== "object" || !raw.id) return null;
+  const ts = Date.now();
+  const item: MemoryItem = {
+    id: String(raw.id),
+    type: normalizeType(raw.type),
+    content: typeof raw.content === "string" ? raw.content : "",
+    tags: Array.isArray(raw.tags) ? raw.tags.map((t: any) => String(t)).slice(0, 30) : [],
+    importance: clampImportance(raw.importance),
+    source: typeof raw.source === "string" ? raw.source : "import",
+    createdAt: typeof raw.createdAt === "number" ? raw.createdAt : ts,
+    updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : ts,
+    lastAccessAt: typeof raw.lastAccessAt === "number" ? raw.lastAccessAt : ts,
+    accessCount: typeof raw.accessCount === "number" ? raw.accessCount : 0,
+    reviewCount: typeof raw.reviewCount === "number" ? raw.reviewCount : 0,
+    lastReviewedAt: typeof raw.lastReviewedAt === "number" ? raw.lastReviewedAt : 0,
+    nextReviewAt: typeof raw.nextReviewAt === "number" ? raw.nextReviewAt : 0,
+    links: Array.isArray(raw.links) ? raw.links.map((l: any) => String(l)).slice(0, MAX_LINKS_PER_MEMORY) : [],
+    space: typeof raw.space === "string" && raw.space ? raw.space : "general"
+  };
+  if (typeof raw.chatId === "string" && raw.chatId) item.chatId = raw.chatId;
+  if (typeof raw.imagePath === "string" && raw.imagePath) item.imagePath = raw.imagePath;
+  if (typeof raw.expiryAt === "number") item.expiryAt = raw.expiryAt;
+  if (raw.pinned === true) item.pinned = true;
+  if (raw.sensitive === true) item.sensitive = true;
+  return item;
+}
+
+export function normalizeStore(raw: unknown): MemoryStore {
+  const store = emptyStore();
+  if (!raw || typeof raw !== "object") return store;
+  const obj = raw as Record<string, any>;
+  if (Array.isArray(obj.items)) {
+    store.items = obj.items
+      .map((it: any) => normalizeItem(it))
+      .filter((it: MemoryItem | null): it is MemoryItem => !!it && it.content.length > 0)
+      .slice(0, MAX_MEMORIES);
+  }
+  if (Array.isArray(obj.conflicts)) {
+    store.conflicts = obj.conflicts
+      .filter((c: any) => c && typeof c === "object" && c.existingId && c.newContent)
+      .slice(-10);
+  }
+  return store;
+}
+
+async function ensureDir(): Promise<void> {
+  try {
+    const r = await Tools.Files.exists(DATA_DIR);
+    if (!r.exists) await Tools.Files.mkdir(DATA_DIR, true);
+  } catch (e) {
+    // ignore
+  }
+}
+
+/** 加密 store 中敏感记忆内容（带 key） */
+export function encryptStoreItems(store: MemoryStore, key: string): void {
+  if (!key) return;
+  store.items.forEach((m) => {
+    if (m.sensitive && m.content && !m.content.startsWith("AES:") && !m.content.startsWith("XOR:")) {
+      m.content = encryptText(m.content, key);
+    }
+  });
+}
+
+/** 解密 store 中敏感记忆内容 */
+export function decryptStoreItems(store: MemoryStore, key: string): void {
+  if (!key) return;
+  store.items.forEach((m) => {
+    if (m.sensitive && m.content && (m.content.startsWith("AES:") || m.content.startsWith("XOR:"))) {
+      const dec = decryptText(m.content, key);
+      if (dec && dec !== m.content) m.content = dec;
+    }
+  });
+}
+
+/** 自动备份：写入 backup/memories_<ts>.json，保留最近 20 份 */
+async function backupStore(store: MemoryStore, key: string): Promise<void> {
+  try {
+    const backupDir = DATA_DIR + "/backup";
+    const exists = await Tools.Files.exists(backupDir);
+    if (!exists.exists) await Tools.Files.mkdir(backupDir, true);
+    const backupStore: MemoryStore = JSON.parse(JSON.stringify(store));
+    encryptStoreItems(backupStore, key);
+    await Tools.Files.write(backupDir + "/memories_" + Date.now() + ".json", JSON.stringify(backupStore), false);
+    // 保留最近 20 份
+    try {
+      const listRes = await Tools.Files.list(backupDir);
+      const files = (listRes && listRes.entries ? listRes.entries : [])
+        .filter((e: any) => !e.isDirectory && String(e.name || "").endsWith(".json"))
+        .map((e: any) => ({ name: String(e.name), path: backupDir + "/" + String(e.name) }))
+        .sort((a: any, b: any) => b.name.localeCompare(a.name));
+      for (const f of files.slice(20)) {
+        try { await Tools.Files.deleteFile(f.path, false, "android"); } catch (e) { /* ignore */ }
+      }
+    } catch (e) {
+      // ignore
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+export async function loadStore(): Promise<MemoryStore> {
+  try {
+    await ensureDir();
+    const res = await Tools.Files.exists(MEMORY_FILE);
+    if (!res.exists) return emptyStore();
+    const data = await Tools.Files.read(MEMORY_FILE);
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(data.content || "{}");
+    } catch (e) {
+      parsed = null;
+    }
+    const store = normalizeStore(parsed);
+    try {
+      const settings = await loadSettings();
+      decryptStoreItems(store, settings.encryptKey || "");
+    } catch (e) {
+      // ignore
+    }
+    return store;
+  } catch (e) {
+    return emptyStore();
+  }
+}
+
+export async function saveStore(store: MemoryStore): Promise<void> {
+  await ensureDir();
+  store.updatedAt = Date.now();
+  let key = "";
+  try {
+    const settings = await loadSettings();
+    key = settings.encryptKey || "";
+    // 过期记忆自动清理（保留 expiredCleanDays 天缓冲，有备份兜底）
+    if (settings.autoCleanExpired) {
+      const cutoff = Date.now() - Math.max(0, settings.expiredCleanDays || 7) * 86400000;
+      const before = store.items.length;
+      store.items = store.items.filter((m) => !(typeof m.expiryAt === "number" && m.expiryAt < cutoff));
+      if (store.items.length < before) {
+        const keepIds = new Set(store.items.map((m) => m.id));
+        store.items.forEach((m) => { m.links = m.links.filter((l) => keepIds.has(l)); });
+      }
+    }
+    if (settings.autoBackup) {
+      await backupStore(store, key);
+    }
+  } catch (e) {
+    // ignore
+  }
+  const clone: MemoryStore = JSON.parse(JSON.stringify(store));
+  encryptStoreItems(clone, key);
+  await Tools.Files.write(MEMORY_FILE, JSON.stringify(clone), false);
+}
+
+export async function loadSettings(): Promise<MemorySettings> {
+  try {
+    await ensureDir();
+    const res = await Tools.Files.exists(SETTINGS_FILE);
+    if (!res.exists) return { ...DEFAULT_SETTINGS };
+    const data = await Tools.Files.read(SETTINGS_FILE);
+    const parsed = JSON.parse(data.content || "{}");
+    return { ...DEFAULT_SETTINGS, ...(parsed || {}) };
+  } catch (e) {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+export async function saveSettings(s: MemorySettings): Promise<void> {
+  await ensureDir();
+  await Tools.Files.write(SETTINGS_FILE, JSON.stringify(s, null, 2), false);
+}
+
+/* ---------------- 记忆 CRUD ---------------- */
+
+export interface RememberInput {
+  content: string;
+  type?: string;
+  tags?: string[];
+  importance?: number;
+  source?: string;
+  linkIds?: string[];
+  expiryAt?: number;
+  pinned?: boolean;
+  space?: string;
+  sensitive?: boolean;
+  chatId?: string;         // 单独记忆：仅该对话框可见；空=通用记忆
+  imagePath?: string;      // 本地图片路径（复制进记忆库）
+  mergeSimilar?: boolean; // 相似内容去重合并
+}
+
+export function findById(store: MemoryStore, id: string): MemoryItem | null {
+  return store.items.find((m) => m.id === id) || null;
+}
+
+/** 相似度去重：内容重叠 >= 0.6 视为重复 */
+function similarity(a: string, b: string): number {
+  const ta = tokenize(a);
+  const tb = tokenize(b);
+  if (!ta.length || !tb.length) return 0;
+  const setA = new Set(ta);
+  let hit = 0;
+  tb.forEach((t) => { if (setA.has(t)) hit++; });
+  return hit / Math.min(ta.length, tb.length);
+}
+
+/** 写入一条记忆（自动标签 / 去重合并 / 关联 / 空间 / 敏感加密） */
+export async function remember(store: MemoryStore, input: RememberInput, settings: MemorySettings): Promise<{ item: MemoryItem; merged: boolean; related: MemoryItem[]; conflicts: ConflictInfo[] }> {
+  const content = String(input.content || "").trim();
+  const now = Date.now();
+  const space = input.space && settings.spaces.includes(input.space) ? input.space : settings.activeSpace || "general";
+
+  // 冲突检测
+  let conflicts: ConflictInfo[] = [];
+  if (settings.conflictCheck) {
+    conflicts = conflictDetect(store, content);
+  }
+
+  // 去重合并：内容高度相似时更新旧记忆（有冲突时不合并，保留旧记忆供确认）
+  let merged = false;
+  if (input.mergeSimilar !== false && conflicts.length === 0) {
+    for (const old of store.items) {
+      if (old.space === space && similarity(old.content, content) >= 0.6) {
+        old.content = content;
+        old.updatedAt = now;
+        if (input.type) old.type = normalizeType(input.type);
+        if (input.tags && input.tags.length) {
+          const set = new Set([...old.tags, ...input.tags.map((t) => String(t).toLowerCase())]);
+          old.tags = Array.from(set).slice(0, 30);
+        }
+        if (input.importance) old.importance = clampImportance(input.importance);
+        if (input.pinned !== undefined) old.pinned = input.pinned;
+        if (input.sensitive === true) old.sensitive = true;
+        return { item: old, merged: true, related: findRelated(store, old, settings), conflicts };
+      }
+    }
+  }
+
+  const tags = settings.autoTag
+    ? extractTags(content, input.tags || [])
+    : (input.tags || []).map((t) => String(t).toLowerCase()).slice(0, 30);
+
+  const item: MemoryItem = {
+    id: genId(),
+    type: normalizeType(input.type),
+    content,
+    tags,
+    importance: clampImportance(input.importance !== undefined ? input.importance : settings.defaultImportance),
+    source: input.source || "manual",
+    createdAt: now,
+    updatedAt: now,
+    lastAccessAt: now,
+    accessCount: 1,
+    reviewCount: 0,
+    lastReviewedAt: 0,
+    nextReviewAt: computeNextReview(0, clampImportance(input.importance !== undefined ? input.importance : settings.defaultImportance), settings.reviewBaseDays, settings.reviewGrowth),
+    links: (input.linkIds || []).slice(0, MAX_LINKS_PER_MEMORY),
+    space
+  };
+  if (typeof input.chatId === "string" && input.chatId) item.chatId = input.chatId;
+  // 图片记忆：复制图片进库并关联
+  if (input.imagePath && detectImageExt(input.imagePath)) {
+    const rel = await copyImageIntoLibrary(input.imagePath, item.id);
+    if (rel) item.imagePath = rel;
+  }
+  if (typeof input.expiryAt === "number") item.expiryAt = input.expiryAt;
+  if (input.pinned === true) item.pinned = true;
+  if (input.sensitive === true) item.sensitive = true;
+
+  store.items.unshift(item);
+  if (store.items.length > MAX_MEMORIES) {
+    store.items = store.items.slice(0, MAX_MEMORIES);
+  }
+
+  // 反向关联：把关联写入目标记忆
+  item.links.forEach((lid) => {
+    const target = findById(store, lid);
+    if (target && !target.links.includes(item.id)) {
+      target.links.push(item.id);
+      target.links = target.links.slice(0, MAX_LINKS_PER_MEMORY);
+    }
+  });
+
+  return { item, merged: false, related: findRelated(store, item, settings), conflicts };
+}
+
+/** 自动关联建议：共享标签的记忆（>=2 个共同标签，或小标签集命中 1 个） */
+export function findRelated(store: MemoryStore, item: MemoryItem, settings: MemorySettings, max: number = 6): MemoryItem[] {
+  if (!settings.autoLink) return [];
+  const candidates = store.items
+    .filter((m) => m.id !== item.id && !item.links.includes(m.id))
+    .map((m) => {
+      const shared = tagShared(item.tags, m.tags);
+      const minLen = Math.min(item.tags.length, m.tags.length);
+      const hit = shared >= 2 || (shared >= 1 && minLen <= 5);
+      return { m, s: hit ? shared + 1 / (minLen + 1) : 0 };
+    })
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, max);
+  return candidates.map((x) => x.m);
+}
+
+/** 执行检索（含过滤 + 打分 + 排序 + 访问记录 + 空间过滤 + 可选语义重排） */
+export async function recall(store: MemoryStore, q: RecallQuery, settings: MemorySettings): Promise<{ items: MemoryItem[]; total: number; touched: boolean }> {
+  const now = Date.now();
+  const query = String(q.query || "").trim();
+  const qTokens = query ? tokenize(query) : [];
+  const tags = (q.tags || []).map((t) => String(t).toLowerCase());
+  const type = q.type ? normalizeType(q.type) : null;
+  const space = q.allSpaces ? null : (q.space || settings.activeSpace || "general");
+
+  let filtered = store.items.filter((m) => {
+    if (space && m.space !== space) return false;
+    // 对话归属过滤：默认仅通用记忆；传 chatId 则含该对话单独记忆；allChats 含全部
+    if (q.allChats !== true) {
+      if (q.chatId) {
+        if (m.chatId && m.chatId !== q.chatId) return false;
+      } else if (m.chatId) {
+        return false;
+      }
+    }
+    if (type && m.type !== type) return false;
+    if (tags.length && !tags.every((tg) => m.tags.map((t) => t.toLowerCase()).includes(tg))) return false;
+    if (typeof q.dateFrom === "number" && m.updatedAt < q.dateFrom) return false;
+    if (typeof q.dateTo === "number" && m.updatedAt > q.dateTo) return false;
+    if (!q.includeExpired && typeof m.expiryAt === "number" && m.expiryAt < now) return false;
+    if (qTokens.length && scoreRelevance(m, qTokens, tags) <= 0) return false;
+    return true;
+  });
+
+  const total = filtered.length;
+
+  if (qTokens.length || tags.length) {
+    const scored = filtered.map((m) => ({ m, s: scoreRelevance(m, qTokens, tags) }));
+    scored.sort((a, b) => b.s - a.s || b.m.updatedAt - a.m.updatedAt);
+    filtered = scored.map((x) => x.m);
+    // 记录访问
+    const top = filtered.slice(0, Math.min(20, total));
+    touchItems(top);
+  } else {
+    filtered = sortItems(filtered, q.sortBy || "time");
+    const top = filtered.slice(0, Math.min(20, total));
+    touchItems(top);
+  }
+
+  // 语义检索重排（可选，embedding API 配置后启用）
+  if (qTokens.length && settings.embedEnabled) {
+    filtered = await rerankByEmbedding(filtered, query, settings);
+  }
+
+  const limit = Math.max(1, Math.min(100, q.limit || 10));
+  return { items: filtered.slice(0, limit), total, touched: true };
+}
+
+/* ---------------- 统计洞察 ---------------- */
+
+export interface MemoryStats {
+  total: number;
+  expired: number;
+  pinned: number;
+  todayAdded: number;
+  weekAdded: number;
+  dueReview: number;
+  typeDist: { type: string; label: string; emoji: string; count: number }[];
+  tagCloud: { tag: string; count: number }[];
+  topActive: MemoryItem[];
+  topImportant: MemoryItem[];
+  avgHealth: number;
+  totalAccess: number;
+  sinceDays: number;
+  lowHealth: number;         // 低健康度（<40）条数，建议清理
+  injectTokenEstimate: number; // 单次注入估算 token（省钱统计）
+}
+
+export function buildStats(store: MemoryStore, settings: MemorySettings): MemoryStats {
+  const now = Date.now();
+  const day = 86400000;
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfWeek = now - 7 * day;
+
+  const tagCount: Record<string, number> = {};
+  store.items.forEach((m) => {
+    m.tags.forEach((t) => { tagCount[t] = (tagCount[t] || 0) + 1; });
+  });
+  const tagCloud = Object.keys(tagCount)
+    .map((tag) => ({ tag, count: tagCount[tag] }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20);
+
+  const typeDist = MEMORY_TYPES.map((t) => ({
+    type: t.key,
+    label: t.labelZh,
+    emoji: t.emoji,
+    count: store.items.filter((m) => m.type === t.key).length
+  }));
+
+  const dueReview = store.items.filter((m) => isReviewDue(m, settings)).length;
+
+  const sortedByAccess = sortItems(store.items, "access").slice(0, 5);
+  const sortedByImportance = sortItems(store.items, "importance").slice(0, 5);
+
+  const healthSum = store.items.reduce((s, m) => s + healthScore(m), 0);
+  const avgHealth = store.items.length ? Math.round(healthSum / store.items.length) : 0;
+
+  const totalAccess = store.items.reduce((s, m) => s + m.accessCount, 0);
+  const sinceDays = store.items.length
+    ? Math.max(1, Math.round((now - Math.min(...store.items.map((m) => m.createdAt))) / day))
+    : 1;
+
+  const injection = buildInjection(store, settings);
+  const injectTokenEstimate = injection ? Math.max(10, Math.round(injection.length / 1.5)) : 0;
+
+  return {
+    total: store.items.length,
+    expired: store.items.filter((m) => typeof m.expiryAt === "number" && m.expiryAt < now).length,
+    pinned: store.items.filter((m) => m.pinned).length,
+    todayAdded: store.items.filter((m) => m.createdAt >= startOfToday.getTime()).length,
+    weekAdded: store.items.filter((m) => m.createdAt >= startOfWeek).length,
+    dueReview,
+    typeDist,
+    tagCloud,
+    topActive: sortedByAccess,
+    topImportant: sortedByImportance,
+    avgHealth,
+    totalAccess,
+    sinceDays,
+    lowHealth: store.items.filter((m) => healthScore(m) < 40).length,
+    injectTokenEstimate
+  };
+}
+
+/* ---------------- 复习队列 ---------------- */
+
+export function reviewQueue(store: MemoryStore, settings: MemorySettings, limit: number = 10): MemoryItem[] {
+  if (!settings.reviewEnabled) return [];
+  return store.items
+    .filter((m) => isReviewDue(m, settings))
+    .sort((a, b) => a.nextReviewAt - b.nextReviewAt)
+    .slice(0, Math.max(1, Math.min(50, limit)));
+}
+
+/** 完成一次复习：重置遗忘曲线 */
+export function completeReview(item: MemoryItem, settings: MemorySettings): void {
+  const now = Date.now();
+  item.reviewCount += 1;
+  item.lastReviewedAt = now;
+  item.nextReviewAt = computeNextReview(item.reviewCount, item.importance, settings.reviewBaseDays, settings.reviewGrowth);
+}
+
+/* ---------------- 注入系统提示词 ---------------- */
+
+/* ---------------- 注入系统提示词（省钱引擎：压缩/缓存友好/冷热分级/日期提醒） ---------------- */
+
+/** 提取重要日期（生日/纪念日）：返回 月/日 */
+export function extractAnnualDate(content: string): { month: number; day: number } | null {
+  const m = String(content || "").match(/(\d{1,2})月(\d{1,2})日/);
+  if (!m) return null;
+  const month = parseInt(m[1], 10);
+  const day = parseInt(m[2], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { month, day };
+}
+
+/** 计算距离下次该日期的天数（0=今天） */
+function daysUntil(month: number, day: number): number {
+  const now = new Date();
+  const thisYear = new Date(now.getFullYear(), month - 1, day);
+  const diff = Math.ceil((thisYear.getTime() - now.getTime()) / 86400000);
+  if (diff >= 0) return diff;
+  const nextYear = new Date(now.getFullYear() + 1, month - 1, day);
+  return Math.ceil((nextYear.getTime() - now.getTime()) / 86400000);
+}
+
+/** 注入缓存（缓存友好模式：文本稳定复用，配合前缀缓存省钱） */
+const INJECTION_CACHE_FILE = DATA_DIR + "/injection_cache.json";
+
+export async function loadInjectionCache(): Promise<{ hash: string; text: string } | null> {
+  try {
+    const res = await Tools.Files.exists(INJECTION_CACHE_FILE);
+    if (!res.exists) return null;
+    const data = await Tools.Files.read(INJECTION_CACHE_FILE);
+    const parsed = JSON.parse(data.content || "{}");
+    if (parsed && parsed.hash && typeof parsed.text === "string") return parsed;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function saveInjectionCache(hash: string, text: string): Promise<void> {
+  try {
+    await ensureDir();
+    await Tools.Files.write(INJECTION_CACHE_FILE, JSON.stringify({ hash, text }), false);
+  } catch (e) {
+    // ignore
+  }
+}
+
+/** 注入缓存 hash：记忆库版本 + 关键设置 + 当前对话 → 文本不变则缓存命中 */
+export function injectionCacheHash(store: MemoryStore, settings: MemorySettings, chatId?: string): string {
+  const parts = [
+    String(store.updatedAt),
+    String(store.items.length),
+    String(chatId || ""),
+    settings.activeSpace,
+    String(settings.injectCount),
+    String(settings.injectIncludeDue),
+    String(settings.dueRemind),
+    String(settings.compactInject),
+    String(settings.hotColdSplit),
+    String(settings.injectGeneral),
+    String(settings.injectSpace),
+    String(settings.birthdayRemind),
+    String(settings.reviewEnabled)
+  ];
+  return parts.join("|");
+}
+
+export function buildInjection(store: MemoryStore, settings: MemorySettings, maxChars: number = 1200, chatId?: string): string {
+  if (!settings.autoInject || store.items.length === 0) return "";
+  const now = Date.now();
+  // 注入范围：通用记忆（chatId 为空，全局共享）∪ 单独记忆（chatId == 当前对话框）
+  const scopeItems = store.items.filter((m) =>
+    (settings.injectGeneral !== false && !m.chatId) ||
+    (settings.injectSpace !== false && chatId && m.chatId === chatId)
+  );
+  const compact = settings.compactInject !== false;
+  const contentMax = compact ? 80 : 120;
+  const tagMax = compact ? 2 : 4;
+
+  // 冷热分级：热记忆（30 天内访问过或访问≥2）全量；冷记忆仅标题行
+  const hotItems = settings.hotColdSplit !== false
+    ? scopeItems.filter((m) => now - m.lastAccessAt < 30 * 86400000 || m.accessCount >= 2)
+    : scopeItems;
+  const coldItems = settings.hotColdSplit !== false
+    ? scopeItems.filter((m) => !(now - m.lastAccessAt < 30 * 86400000 || m.accessCount >= 2))
+    : [];
+
+  const due = settings.injectIncludeDue
+    ? scopeItems.filter((m) => isReviewDue(m, settings)).slice(0, 2)
+    : [];
+  const picked: MemoryItem[] = [];
+  const seen = new Set<string>();
+  // 注入总条数上限（修复：原实现只约束了候选填充，pinned+due 可无限挤入）
+  const cap = Math.max(1, Number(settings.injectCount) || 3);
+  // 置顶记忆优先占位（pinned = 常驻提示）；数量受总上限约束，避免置顶过多把预算吃光
+  if (settings.injectPinnedAlways !== false) {
+    scopeItems
+      .filter((m) => m.pinned === true)
+      .sort((a, b) => b.importance - a.importance || b.updatedAt - a.updatedAt)
+      .forEach((m) => {
+        if (picked.length >= cap) return;
+        if (!seen.has(m.id)) { seen.add(m.id); picked.push(m); }
+      });
+  }
+  // 到期复习项占用剩余名额
+  due.forEach((m) => {
+    if (picked.length >= cap) return;
+    if (!seen.has(m.id)) { seen.add(m.id); picked.push(m); }
+  });
+  const candidates = sortItems(hotItems.filter((m) => !seen.has(m.id)), "importance");
+  for (const m of candidates) {
+    if (picked.length >= cap) break;
+    if (typeof m.expiryAt === "number" && m.expiryAt < now) continue;
+    picked.push(m);
+  }
+
+  const lines: string[] = [];
+  picked.forEach((m) => {
+    const t = TYPE_MAP[m.type] || TYPE_MAP["fact"];
+    const tagPart = m.tags.length ? " #" + m.tags.slice(0, tagMax).join("#") : "";
+    const spacePart = m.space !== "general" ? "[" + m.space + "] " : "";
+    const sensPart = m.sensitive ? "🔒" : "";
+    if (compact) {
+      lines.push(`- ${t.emoji}${m.content.slice(0, contentMax)}${sensPart}${tagPart}`);
+    } else {
+      const timePart = formatTime(m.createdAt);
+      lines.push(`- [${t.emoji}${t.labelZh}|★${m.importance}|${timePart}] ${spacePart}${m.content.slice(0, contentMax)}${sensPart}${tagPart}`);
+    }
+  });
+
+  // 冷记忆标题行（最多 2 条）
+  if (settings.hotColdSplit !== false && coldItems.length) {
+    const coldTop = sortItems(coldItems, "importance").slice(0, 2);
+    const coldLines = coldTop.map((m) => {
+      const t = TYPE_MAP[m.type] || TYPE_MAP["fact"];
+      return `${t.emoji}${m.content.slice(0, 16)}…`;
+    });
+    if (coldLines.length) lines.push(`(更多记忆：${coldLines.join("、")}，需要详情可用 dm_recall 检索)`);
+  }
+
+  // 到期/过期提醒（通用 + 当前空间）
+  if (settings.dueRemind) {
+    const expired = scopeItems.filter((m) => typeof m.expiryAt === "number" && m.expiryAt < now).slice(0, 2);
+    const dueSoon = scopeItems.filter((m) => typeof m.expiryAt === "number" && m.expiryAt >= now && m.expiryAt - now <= 86400000).slice(0, 2);
+    expired.forEach((m) => lines.push(`⚠️[已过期]${m.content.slice(0, 60)}`));
+    dueSoon.forEach((m) => lines.push(`⏰[今日到期]${m.content.slice(0, 60)}`));
+  }
+
+  // 重要日期提醒（生日/纪念日，通用 + 当前空间）
+  if (settings.birthdayRemind) {
+    const dateItems = scopeItems.filter((m) => /(生日|纪念日|周年)/.test(m.content));
+    for (const m of dateItems) {
+      const d = extractAnnualDate(m.content);
+      if (!d) continue;
+      const days = daysUntil(d.month, d.day);
+      if (days >= 0 && days <= 7) {
+        const head = days === 0 ? "🎂今天" : `📅${days}天后`;
+        lines.push(`${head}是${m.content.slice(0, 30).replace(/我的|我是|的生日/g, "")}的生日/纪念日（${d.month}月${d.day}日）`);
+        break;
+      }
+    }
+  }
+
+  // 冲突提醒
+  const conflicts = store.conflicts || [];
+  if (conflicts.length) {
+    const last = conflicts[conflicts.length - 1];
+    lines.push(`⚠️[记忆冲突]${last.newContent.slice(0, 30)} 与旧记忆不一致，可用 dm_conflicts 确认`);
+  }
+
+  if (!lines.length) return "";
+  const scopeName = (settings.injectGeneral !== false ? "通用" : "") + ((settings.injectGeneral !== false && settings.injectSpace !== false && chatId) ? "+单独" : "") + (settings.injectSpace !== false && chatId ? "" : "");
+  const header = compact ? `\n[深度记忆${scopeName ? "·" + scopeName : ""}]` : `\n[深度记忆] 注入范围：${scopeName || "全部"}，当前可能相关的记忆：`;
+  // 整行裁剪：超出预算时丢弃整条并告知条数，避免把某条记忆切断成半句
+  const assemble = (budget: number) => {
+    let out = header;
+    let drop = 0;
+    for (const ln of lines) {
+      if (out.length + 1 + ln.length > budget) { drop++; continue; }
+      out += "\n" + ln;
+    }
+    return { out, drop };
+  };
+  let r = assemble(maxChars);
+  if (r.drop > 0) {
+    // 预算不够时：先按字符上限扩容一次（injectBudgetChars），仍不够才提示丢弃
+    const bigger = Math.max(maxChars, Number(settings.injectBudgetChars) || 0);
+    if (bigger > maxChars) {
+      const r2 = assemble(bigger);
+      if (r2.drop === 0) return r2.out;
+      r = r2;
+      maxChars = bigger;
+    }
+    const note = `\n…（另有 ${r.drop} 条因超出注入预算未显示，可用 dm_recall 检索）`;
+    r = assemble(maxChars - note.length);
+    r.out += note;
+  }
+  return r.out.length > maxChars ? r.out.slice(0, maxChars) + "\n…" : r.out;
+}
+
+/* ---------------- 图片记忆 ---------------- */
+
+const IMAGE_EXTS = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "avif"];
+
+/** 校验路径是否为图片文件，返回扩展名；非图片返回空 */
+export function detectImageExt(path: string): string {
+  const m = String(path || "").match(/\.([a-zA-Z0-9]+)$/);
+  if (!m) return "";
+  const ext = m[1].toLowerCase();
+  return IMAGE_EXTS.includes(ext) ? ext : "";
+}
+
+/** 复制本地图片进记忆库 images/ 目录，返回相对路径（images/<id>.<ext>）；失败返回空 */
+export async function copyImageIntoLibrary(sourcePath: string, id: string): Promise<string> {
+  const ext = detectImageExt(sourcePath);
+  if (!ext) return "";
+  try {
+    const dirExists = await Tools.Files.exists(IMAGES_DIR);
+    if (!dirExists.exists) await Tools.Files.mkdir(IMAGES_DIR, true);
+    const dest = `${IMAGES_DIR}/${id}.${ext}`;
+    await Tools.Files.copy(sourcePath, dest, false, "android", "android");
+    return `images/${id}.${ext}`;
+  } catch (e) {
+    return "";
+  }
+}
+
+/** 把记忆关联的图片复制到导出目录（返回导出的绝对路径） */
+export async function copyImageForExport(item: MemoryItem, targetDir: string): Promise<string> {
+  if (!item.imagePath) return "";
+  try {
+    const src = `${DATA_DIR}/${item.imagePath}`;
+    const exists = await Tools.Files.exists(src);
+    if (!exists.exists) return "";
+    const name = item.imagePath.split("/").pop() || "image";
+    const dest = `${targetDir}/${name}`;
+    await Tools.Files.copy(src, dest, false, "android", "android");
+    return dest;
+  } catch (e) {
+    return "";
+  }
+}
+
+/* ---------------- 导出导入 bundle（JSON + 图片） ---------------- */
+
+export interface BundleExportResult {
+  bundlePath: string;
+  memoryCount: number;
+  imageCount: number;
+}
+
+/** 导出完整记忆包（目录：memories.json + images/），可直接拷贝/压缩分享 */
+export async function exportBundle(store: MemoryStore, settings: MemorySettings): Promise<BundleExportResult> {
+  const dir = `${EXPORT_DIR}/backup_${Date.now()}`;
+  await Tools.Files.mkdir(dir, true);
+  // 写 memories.json（含加密）
+  const clone: MemoryStore = JSON.parse(JSON.stringify(store));
+  encryptStoreItems(clone, settings.encryptKey || "");
+  await Tools.Files.write(`${dir}/memories.json`, JSON.stringify(clone, null, 2), false);
+  // 复制图片
+  const imageDir = `${dir}/images`;
+  await Tools.Files.mkdir(imageDir, true);
+  const itemsWithImage = clone.items.filter((m) => m.imagePath);
+  let imageCount = 0;
+  for (const item of itemsWithImage) {
+    const src = `${DATA_DIR}/${item.imagePath}`;
+    try {
+      const exists = await Tools.Files.exists(src);
+      if (exists.exists) {
+        const name = item.imagePath!.split("/").pop() || "image";
+        await Tools.Files.copy(src, `${imageDir}/${name}`, false, "android", "android");
+        imageCount++;
+      }
+    } catch (e) {
+      // skip missing image
+    }
+  }
+  // 写入说明
+  await Tools.Files.write(
+    `${dir}/README.txt`,
+    `深度记忆备份\n时间：${formatTime(Date.now())}\n记忆条数：${clone.items.length}\n图片：${imageCount} 张\n恢复：dm_import_bundle(path="此目录或压缩包")`,
+    false
+  );
+  return { bundlePath: dir, memoryCount: clone.items.length, imageCount };
+}
+
+export interface BundleImportResult {
+  added: number;
+  imageCount: number;
+}
+
+/** 从 bundle 导入（支持目录或 zip；合并；memories.json 内为加密内容时需密钥） */
+export async function importBundle(store: MemoryStore, bundlePath: string, settings: MemorySettings): Promise<BundleImportResult> {
+  let baseDir = bundlePath;
+  const directExists = await Tools.Files.exists(`${bundlePath}/memories.json`);
+  if (!directExists.exists) {
+    // 可能是 zip，解压到临时目录
+    const tmpDir = `${DATA_DIR}/import_tmp_${Date.now()}`;
+    await Tools.Files.mkdir(tmpDir, true);
+    try {
+      await Tools.Files.unzip(bundlePath, tmpDir, "android");
+    } catch (e) {
+      return { added: 0, imageCount: 0 };
+    }
+    baseDir = tmpDir;
+  }
+  const memRes = await Tools.Files.exists(`${baseDir}/memories.json`);
+  if (!memRes.exists) return { added: 0, imageCount: 0 };
+  const data = await Tools.Files.read(`${baseDir}/memories.json`);
+  const parsed = JSON.parse(data.content || "{}");
+  const imported = normalizeStore(parsed);
+  decryptStoreItems(imported, settings.encryptKey || "");
+  // 复制图片
+  let imageCount = 0;
+  try {
+    const imgDir = `${baseDir}/images`;
+    const imgExists = await Tools.Files.exists(imgDir);
+    if (imgExists.exists) {
+      const listRes = await Tools.Files.list(imgDir);
+      const files = (listRes && listRes.entries ? listRes.entries : []).filter((e: any) => !e.isDirectory);
+      for (const f of files) {
+        const name = String(f.name);
+        if (!name) continue;
+        const src = `${imgDir}/${name}`;
+        const dest = `${IMAGES_DIR}/${name}`;
+        const destExists = await Tools.Files.exists(dest);
+        if (!destExists.exists) {
+          await Tools.Files.copy(src, dest, false, "android", "android");
+          imageCount++;
+        }
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  const existing = new Set(store.items.map((m) => m.id));
+  const fresh = imported.items.filter((m) => !existing.has(m.id));
+  store.items = fresh.concat(store.items).slice(0, MAX_MEMORIES);
+  return { added: fresh.length, imageCount };
+}
+
+/* ---------------- 导入导出 ---------------- */
+
+export function exportJson(store: MemoryStore): string {
+  return JSON.stringify({ app: "deep_memory", version: 1, exportedAt: Date.now(), items: store.items }, null, 2);
+}
+
+export function importJson(store: MemoryStore, raw: string, mode: "merge" | "replace"): { added: number; total: number } {
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error("JSON 解析失败");
+  }
+  const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.items) ? parsed.items : []);
+  const imported = list
+    .map((it: any) => normalizeItem(it))
+    .filter((it: MemoryItem | null): it is MemoryItem => !!it);
+  if (!imported.length) return { added: 0, total: store.items.length };
+
+  if (mode === "replace") {
+    store.items = imported.slice(0, MAX_MEMORIES);
+    return { added: imported.length, total: store.items.length };
+  } else {
+    const existing = new Set(store.items.map((m) => m.id));
+    const fresh = imported.filter((m) => !existing.has(m.id));
+    store.items = fresh.concat(store.items).slice(0, MAX_MEMORIES);
+    return { added: fresh.length, total: store.items.length };
+  }
+}
