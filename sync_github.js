@@ -25,6 +25,25 @@ if (!TOKEN) {
   console.error("[FATAL] 缺 GH_TOKEN 环境变量");
   process.exit(1);
 }
+// —— 推前强制隐私闸门：不通过就不出包、不推送 ——
+{
+  const chk = path.join(ROOT, "privacy_check.js");
+  if (!fs.existsSync(chk)) {
+    console.error("[FATAL] 缺隐私检查脚本，拒绝推送");
+    process.exit(1);
+  }
+  try {
+    const out = execSync('node "' + chk + '" "' + ROOT + '"', {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    process.stdout.write(out);
+  } catch (e) {
+    process.stdout.write(String(e.stdout || "") + String(e.stderr || ""));
+    console.error("[FATAL] 隐私检查未通过，已阻止推送");
+    process.exit(1);
+  }
+}
 
 function api(method, url, body) {
   const args = ["-s", "-m", "60", "-X", method];
@@ -99,8 +118,10 @@ for (const rel of Object.keys(local).sort()) {
 // 3b. 本地已删、远端还留着的"本项目根级文件"一并删掉
 //     只处理根目录下的 .js/.py（脚本类），历史目录 patches/ verify/ docs/ 一律不动
 const DELETABLE = /^[^/]+\.(js|py)$/;
+// 已知垃圾/占位文件：即便远端存在也强制移除（写入 git 后再也删不掉，只能显式点名）
+const PURGE = new Set(["test_memory_image.jpg"]);
 const deleted = Object.keys(remoteSha)
-  .filter((p) => local[p] === undefined && DELETABLE.test(p))
+  .filter((p) => local[p] === undefined && (DELETABLE.test(p) || PURGE.has(p)))
   .sort();
 
 console.log("远端 HEAD: " + headSha.slice(0, 7) + "  文件 " + Object.keys(remoteSha).length + " 个");

@@ -70,6 +70,14 @@ if (got.code === 200) {
   rel = got.json;
   console.log("[release] 已存在 tag v" + ver + " id=" + rel.id + "，复用");
 } else {
+  // manifest.description 可能是 {zh, en} 对象，Release body 只接受字符串
+  let bodyText = "";
+  if (process.argv[3] && fs.existsSync(process.argv[3])) {
+    bodyText = fs.readFileSync(process.argv[3], "utf8");
+  } else {
+    const d = manifest.description;
+    bodyText = typeof d === "string" ? d : d && d.zh ? d.zh : "Operit 深度记忆插件 v" + ver;
+  }
   const bodyPath = "/tmp/_rel_body.json";
   fs.writeFileSync(
     bodyPath,
@@ -77,7 +85,7 @@ if (got.code === 200) {
       tag_name: "v" + ver,
       target_commitish: "main",
       name: "v" + ver,
-      body: process.argv[3] && fs.existsSync(process.argv[3]) ? fs.readFileSync(process.argv[3], "utf8") : manifest.description || "",
+      body: bodyText,
       draft: false,
       prerelease: false,
     }),

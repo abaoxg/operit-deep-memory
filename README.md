@@ -86,7 +86,7 @@
 
 ## 数据位置
 
-`<PLUGIN_DATA_DIR>/`
+`/sdcard/Download/Operit/plugins/com.operit.deep_memory/`
 - `memories.json` 记忆库（上限 5000 条，敏感项加密）
 - `settings.json` 引擎设置（自动提取/冲突/提醒/空间/加密密钥/Embedding/AI 判定）
 - `ai_state.json` AI 调用统计与配额（每小时计数、成功/跳过/失败数、最近结果）
@@ -133,9 +133,28 @@ node release.js
 ```
 
 `sync_github.js` 注意点：
+- **推送前自动跑隐私闸门**（见下节），不通过直接 `exit 1`，不会推上去任何东西
 - 用 `base_tree` 建树，**只覆盖有差异的文件，远端其他文件保留**，不会误删历史目录（`patches/`、`verify/`、`docs/`）
 - 判断是否要传用的是 `git blob sha1`（`sha1("blob <len>\0" + content)`），不是普通 sha1，否则所有文件都会被判定为「有差异」
 - 中途失败时分支指针不动，远端保持原样，重跑即可
+
+## 隐私闸门（`privacy_check.js`）
+
+公开仓库一旦推错了内容，删掉再推是**无效**的 —— 旧 commit 仍可通过 URL 访问，必须删仓库重建才能让旧对象失效。所以把「记得检查」换成强制闸门：`sync_github.js` 入口处调用，`exit 1` 即中断，不发一个字节。
+
+检查三类：
+
+1. **硬模式匹配**：访问令牌、私钥块、家庭路由器口令、内网网关地址、个人设备型号、私有项目名、个人代称、个人工作区路径、手机号、邮箱、记忆条目 id、会话 UUID 等
+2. **记忆库正文比对**：把当前记忆库每条内容切成「连续 ≥10 个汉字」的片段去比对源码，避免把插件自身术语（`injectCount`、`cacheFriendly` 这类）误判成泄漏
+3. **禁止入库清单**：`memories.json`、`settings.json`、`ai_state.json`、`ai_extract.log`、`injection_cache.json`、`backup/`、凭据文件一律不许出现在仓库里
+
+单独跑：
+
+```bash
+node privacy_check.js .      # 退出码 0 = 可推，1 = 有拦截项
+```
+
+> 写扫描器时注意：规则串本身会被自己扫到，需把字面量拆成拼接（例如 `"ab" + "cd"`）并跳过检查器自身文件；同时务必做负向控制 —— 拿同一套规则去扫未清洗的原件，能命中原有的敏感内容才算扫描器有效，否则「0 命中」可能只是规则写坏了。
 
 ## 版本
 v1.1.3 · toolpkg_id: `com.operit.deep_memory`

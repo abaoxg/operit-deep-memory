@@ -158,10 +158,10 @@ async function getStore() { return core.loadStore(); }
     console.log("=== 7. JSON 带代码块包裹也能解析 ===");
     chatCalls = [];
     chatBehavior = () => ({
-        text: '```json\n{"remember":true,"items":[{"content":"用户设备是某安卓手机","type":"fact","importance":4,"sensitive":false,"space":"general"}]}\n```',
+        text: '```json\n{"remember":true,"items":[{"content":"用户设备是某品牌X1","type":"fact","importance":4,"sensitive":false,"space":"general"}]}\n```',
         finishReason: "stop"
     });
-    r = await ai.aiExtractText("我这台是某安卓手机，系统是安卓 13", undefined);
+    r = await ai.aiExtractText("我这台是某品牌 X1，系统是安卓 13", undefined);
     ok("从代码块中解析出记忆", r.data && r.data.by === "ai" && r.data.matched === true, r.data);
 
     console.log("=== 8. 敏感词自动标记 ===");
