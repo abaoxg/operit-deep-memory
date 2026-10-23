@@ -298,6 +298,7 @@ function settingsText(ctx: ComposeDslContext, s: any, setS: (patch: Record<strin
     toggleRow("★ 记录 AI 自己的行动与待办（不只记你说的话）", "aiSideExtract"),
     toggleRow("★ AI 记忆语义去重（同一件事只留一条）", "aiSideDedup"),
     toggleRow("★ AI 待办自动结案（已完成自动移除）", "aiSideTaskAutoClose"),
+    toggleRow("★ 对照库内已有记忆去重（换说法也认）", "contextDedup"),
     numberRow("AI 待办未结案过期小时数", "aiSideTaskTtlHours"),
     numberRow("AI 侧记忆最短字数", "aiSideMinLen"),
     numberRow("AI 侧每小时最多触发次数", "aiSideMaxPerHour"),

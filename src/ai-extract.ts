@@ -46,6 +46,7 @@ export const DEFAULTS = {
   // ---- AI 侧记忆质量（v1.2.5）----
   aiSideDedup: true,
   aiSideTaskAutoClose: true,
+  contextDedup: true,
   aiSideTaskTtlHours: 72
 };
 
@@ -358,11 +359,50 @@ function sampleForAiSide(t: string): string {
   return head + "\n…（中间省略 " + (s.length - 3900) + " 字）…\n" + tail;
 }
 
-function buildTurns(text: string, side?: string): any[] {
+/* v1.2.9：把库里已有的高价值约束带给模型，让它在提取阶段就避开重复。
+ *
+ * 为什么必须在「提取时」做，而不是落盘后再去重：
+ *   实测你的三条边界（f2.enc 不能动 / 文件只许写工作区 / 删前必须确认）
+ *   被反复重写成 10 条不同说法。用词面相似度去重，45 对同义句最多只能识别出 13 对，
+ *   阈值降到 0.35 也会误伤真正不同的记忆。这类「换句话再说一遍」只有语义能判，
+ *   而能判语义的就是模型自己 —— 所以把已有条目直接摆给它看。
+ *
+ * 代价：每批多带最多 24 条短句；收益：不再出现同一条边界记十遍、把额度吃光。
+ */
+function buildKnownContext(items: any[], charId?: string): string {
+  const want = String(charId || "");
+  const picked: string[] = [];
+  const now = Date.now();
+  for (const m of items || []) {
+    if (!m) continue;
+    // 只带同作用域：全局带全局，角色带角色，避免把别人的私事当上下文
+    if (String(m.characterId || "") !== want) continue;
+    if ((Number(m.importance) || 0) < 4) continue;          // 4 分以上才算「边界/偏好」，细节不占额度
+    if (typeof m.expiryAt === "number" && m.expiryAt < now) continue;
+    const c = String(m.content || "").trim();
+    if (!c) continue;
+    picked.push("- " + (c.length > 70 ? c.slice(0, 70) + "…" : c));
+    if (picked.length >= 24) break;
+  }
+  if (!picked.length) return "";
   return [
-    { kind: "SYSTEM", content: side === "ai" ? AI_SIDE_PROMPT : SYSTEM_PROMPT },
-    { kind: "USER", content: text }
+    "【已有记忆 · 只读】库里目前已经记下的高价值信息：",
+    ...picked,
+    "",
+    "【去重要求 · 必须遵守】",
+    "上面任何一条已经表达过的意思，都不要写成新记忆 —— 即使换了说法、补了细节、改了主语，也算重复。",
+    "只有确实带来上面没有的新信息（新的文件、新的数值、新的对象、新的边界）时才写。",
+    "如果这段内容只是把已有条目重述一遍，输出 {\"remember\":false,\"items\":[]}。"
+  ].join("\n");
+}
+
+function buildTurns(text: string, side?: string, ctxHint?: string): any[] {
+  const turns: any[] = [
+    { kind: "SYSTEM", content: side === "ai" ? AI_SIDE_PROMPT : SYSTEM_PROMPT }
   ];
+  if (ctxHint) turns.push({ kind: "SYSTEM", content: ctxHint });
+  turns.push({ kind: "USER", content: text });
+  return turns;
 }
 
 /* ---------------- 解析 ---------------- */
@@ -560,7 +600,18 @@ export async function aiExtractMessage(text: string, chatId?: string, settings?:
     st.callCount = (st.callCount || 0) + 1;
     st.totalCalls = (st.totalCalls || 0) + 1;
   }
-  const res = await callModelCascade(buildTurns(t, side), s);
+  /* v1.2.9：调用模型前先取一次库，把已记下的高价值条目一起送进去。
+     取不到库不能影响主流程 —— 记忆提取失败不该阻塞对话。 */
+  let ctxHint = "";
+  if (s.contextDedup !== false) {
+    try {
+      const ctxStore = await loadStore();
+      ctxHint = buildKnownContext(ctxStore.items, characterId);
+    } catch (e) {
+      ctxHint = "";
+    }
+  }
+  const res = await callModelCascade(buildTurns(t, side, ctxHint), s);
   out.aiUsed = true;
   if (!res.ok) {
     out.error = res.error;

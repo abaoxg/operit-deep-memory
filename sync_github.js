@@ -80,7 +80,7 @@ function blobSha(buf) {
 
 function walk(dir, base, out) {
   for (const name of fs.readdirSync(dir)) {
-    if (name === "_t" || name === "node_modules" || name === ".git") continue;
+    if (name === "_t" || name === "node_modules" || name === ".git" || name === "_localonly") continue;
     const full = path.join(dir, name);
     const rel = base ? base + "/" + name : name;
     if (fs.statSync(full).isDirectory()) walk(full, rel, out);

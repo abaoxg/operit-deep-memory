@@ -101,7 +101,8 @@ function test1_promptSplit() {
   ok("AI 侧提示词是对话记忆整理器", src.indexOf("对话记忆整理器") >= 0);
   ok("AI 侧提示词禁止记自身流水", src.indexOf("不记「我干了什么活」") >= 0);
   ok("AI 侧提示词旧身份已移除", src.indexOf("AI 行动记录器") < 0);
-  ok("buildTurns 接受 side 参数", /function buildTurns\(text: string, side\?: string\)/.test(src));
+  // v1.2.9：buildTurns 增加可选的 ctxHint（已有记忆上下文），断言不再写死完整签名
+  ok("buildTurns 接受 side 参数", /function buildTurns\(text: string, side\?: string/.test(src));
   ok("AI 侧走 AI_SIDE_PROMPT", /side === "ai" \? AI_SIDE_PROMPT : SYSTEM_PROMPT/.test(src));
   ok("AI 侧禁止 forget", src.indexOf("遗忘只能由用户侧发起") >= 0);
 }

@@ -50,10 +50,12 @@ FILES = [
     "test_ai_side_quality.js",
     "test_tag_link.js",
     "test_hook_timeout.js",
-        "test_ai_cap.js",
+    "test_ai_cap.js",
     "test_group_scope.js",
     "test_meta_filter.js",
     "test_ai_quota_semantics.js",
+    "test_context_dedup.js",
+    "test_char_name_guard.js",
 ]
 
 

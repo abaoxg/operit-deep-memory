@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.deep_memory",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "api_version": "1.0.1",
   "main": "dist/main.js",
   "display_name": {
@@ -9,8 +9,8 @@
     "en": "Deep Memory"
   },
   "description": {
-    "zh": "六边形长期记忆插件 · v1.2.9 配额语义修正版：AI 侧每小时配额改为只统计「真正写进库的记忆条数」，不再按调用尝试次数计费 —— 规则能拦下的操作流水不再消耗额度，避免连续工具输出几分钟就刷满额度、导致之后整小时用户的话一条也记不进来。用户侧记身份/偏好/事件/关系，AI 侧只提取关于用户与事件的事实，不记自身的工程流水。支持群聊记忆归属（scope=global/character/group + speaker，用户本人在群里说的话跨场景可见、群成员的话只在该群可见）、角色记忆隔离、类型与重要性自动判定、冲突检测、艾宾浩斯复习、注入预算优化，以及坏库隔离与备份回退的数据安全保护。零外部依赖，无需 API Key。",
-    "en": "Hexagonal long-term memory plugin, v1.2.9 (quota semantics fix). The AI-side hourly quota now counts only memories actually written, not extraction attempts, so on-rule-rejected tool logs no longer burn the budget and block the user's real statements for the rest of the hour. User side stores identity/preferences/events/relations; the AI side only extracts facts about the user and events. Group chat ownership (scope=global/character/group plus speaker) keeps user statements visible across scenes while group members stay scoped to that group. Includes character isolation, auto type/importance, conflict detection, Ebbinghaus review, injection budgeting, and corrupt-store isolation with backup fallback. Zero deps, no API key."
+    "zh": "六边形长期记忆插件 · v1.2.10 换说法也能去重版：写入前会把库里已有的高重要性记忆一并交给模型做参照，「同一件事换个说法、补个细节、改个主语」也能被认成重复 —— 实测只靠词面相似度，45 对同义句的最高相似度只有 0.487，批内去重根本挡不住改写，记忆库会以每天几十条的速度堆积同义表述。同时修掉角色名被群标题冲成「1」的问题：弱名字（纯数字、单字符、\"未命名角色\"）不再覆盖已有的正常名字。AI 侧每小时配额只统计真正写进库的条数，规则能拦下的操作流水不消耗额度；用户侧记身份/偏好/事件/关系，AI 侧只提取关于用户与事件的事实，不记自身工程流水。支持群聊记忆归属（scope=global/character/group + speaker）、角色记忆隔离、类型与重要性自动判定、冲突检测、艾宾浩斯复习、注入预算优化，以及坏库隔离与备份回退。零外部依赖，无需 API Key。",
+    "en": "Hexagonal long-term memory plugin, v1.2.10 (paraphrase-aware dedup). Before writing, the plugin feeds the store's existing high-importance memories back to the model as reference, so the same fact restated with different wording, extra detail or a different subject is still recognised as a duplicate. Lexical similarity alone tops out at 0.487 across 45 paraphrase pairs, so batch-level dedup cannot catch rewrites and the store accumulates dozens of near-duplicates per day. Also fixes character names being overwritten by chat titles such as \"1\": weak names (pure digits, single characters, \"unnamed\") no longer clobber a real name. The AI-side hourly quota counts only memories actually written, so rule-rejected tool logs burn no budget. User side stores identity/preferences/events/relations; the AI side only extracts facts about the user and events. Group chat ownership (scope=global/character/group plus speaker), character isolation, auto type/importance, conflict detection, Ebbinghaus review, injection budgeting, corrupt-store isolation with backup fallback. Zero deps, no API key."
   },
   "enabled_by_default": true,
   "subpackages": [

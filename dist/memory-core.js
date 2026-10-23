@@ -6,7 +6,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isVisibleToCharacter = exports.scopeOf = exports.findRelated = exports.remember = exports.closeAiSideTasks = exports.findRedundant = exports.featureAnchors = exports.findById = exports.saveSettings = exports.loadSettings = exports.saveStore = exports.loadStore = exports.decryptStoreItems = exports.encryptStoreItems = exports.normalizeStore = exports.normalizeItem = exports.touchItems = exports.sortItems = exports.scoreRelevance = exports.isReviewDue = exports.healthScore = exports.computeNextReview = exports.retagAll = exports.relinkAll = exports.pruneTagsByReuse = exports.tagFreqMap = exports.extractTags = exports.normalizeType = exports.clampImportance = exports.rerankByEmbedding = exports.embedTexts = exports.buildReport = exports.conflictDetect = exports.extractMemoryIntent = exports.decryptText = exports.encryptText = exports.genId = exports.formatTime = exports.DEFAULT_SETTINGS = exports.TYPE_MAP = exports.MEMORY_TYPES = exports.DEFAULT_IMPORTANCE = exports.MAX_LINKS_PER_MEMORY = exports.MAX_MEMORIES = exports.EXPORT_DIR = exports.IMAGES_DIR = exports.SETTINGS_FILE = exports.MEMORY_FILE = exports.DATA_DIR = exports.PLUGIN_ID = void 0;
-exports.importJson = exports.exportJson = exports.importBundle = exports.exportBundle = exports.copyImageForExport = exports.copyImageIntoLibrary = exports.detectImageExt = exports.buildInjection = exports.injectionCacheHash = exports.saveInjectionCache = exports.loadInjectionCache = exports.extractAnnualDate = exports.completeReview = exports.reviewQueue = exports.buildStats = exports.recall = exports.characterStats = exports.touchCharacterRegistry = exports.resolveCharacterId = exports.resolvePromptScope = exports.isInjectable = void 0;
+exports.importJson = exports.exportJson = exports.importBundle = exports.exportBundle = exports.copyImageForExport = exports.copyImageIntoLibrary = exports.detectImageExt = exports.buildInjection = exports.injectionCacheHash = exports.saveInjectionCache = exports.loadInjectionCache = exports.extractAnnualDate = exports.completeReview = exports.reviewQueue = exports.buildStats = exports.recall = exports.characterStats = exports.touchCharacterRegistry = exports.isWeakCharacterName = exports.resolveCharacterId = exports.resolvePromptScope = exports.isInjectable = void 0;
 exports.PLUGIN_ID = "com.operit.deep_memory";
 exports.DATA_DIR = `/sdcard/Download/Operit/plugins/${exports.PLUGIN_ID}`;
 exports.MEMORY_FILE = `${exports.DATA_DIR}/memories.json`;
@@ -80,6 +80,9 @@ exports.DEFAULT_SETTINGS = {
     aiSideDedup: true,
     // 待办自动结案默认开：一次性待办完成后必须消失，否则会一直注入「尚未验证」误导后续对话。
     aiSideTaskAutoClose: true,
+    // v1.2.9：只做「批内」去重挡不住改写（实测 45 对同义句相似度最高仅 0.487），
+    // 必须把库里已有约束一起给模型看，才可能认出「换了个说法的同一件事」。
+    contextDedup: true,
     aiSideTaskTtlHours: 72,
     // 注入预算：pinned 常驻 + 按重要性挑选，避免记忆变多后盖不全
     injectPinnedAlways: true,
@@ -1461,6 +1464,21 @@ function resolveCharacterId(evt) {
     return { id: "", name: "" };
 }
 exports.resolveCharacterId = resolveCharacterId;
+/** 判定一个显示名是不是「弱名字」：空、纯数字、单字符、或明显是会话编号。
+ *  群里第一条消息的标题常常就是 "1" 这种，不能拿它盖掉已经记好的名字。 */
+function isWeakCharacterName(name) {
+    const s = String(name || "").trim();
+    if (!s)
+        return true;
+    if (s.length < 2)
+        return true;
+    if (/^[\d\s._\-]+$/.test(s))
+        return true;
+    if (/^(未命名角色|未知角色|undefined|null|NaN)$/i.test(s))
+        return true;
+    return false;
+}
+exports.isWeakCharacterName = isWeakCharacterName;
 /** 维护角色注册表：记录出现过的角色，便于 UI 分组与历史记忆补名 */
 function touchCharacterRegistry(settings, id, name) {
     if (!id)
@@ -1471,7 +1489,10 @@ function touchCharacterRegistry(settings, id, name) {
     const hit = settings.characterRegistry.find((c) => c.id === id);
     if (hit) {
         let changed = false;
-        if (name && hit.name !== name) {
+        // v1.2.9：只有新名字更「实」时才覆盖。否则 "1" 这类群标题会把好名字冲掉。
+        const incomingWeak = isWeakCharacterName(name);
+        const currentWeak = isWeakCharacterName(hit.name);
+        if (name && hit.name !== name && (!incomingWeak || currentWeak)) {
             hit.name = name;
             changed = true;
         }

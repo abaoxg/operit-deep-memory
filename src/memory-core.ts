@@ -134,6 +134,7 @@ export interface MemorySettings {
   /* ---- v1.2.5：AI 侧记忆质量（去重 + 待办结案）---- */
   aiSideDedup: boolean;            // AI 侧写入前做语义去重，避免同一件事反复记
   aiSideTaskAutoClose: boolean;    // AI 侧待办自动结案（完成即删除，不留僵尸待办）
+  contextDedup: boolean;           // 写入前把库里已有的高重要性记忆一并给模型做参照去重（v1.2.9）
   aiSideTaskTtlHours: number;      // 未结案待办的保留小时数，超时自动过期
   /* 注入预算 */
   injectPinnedAlways: boolean;     // 置顶记忆常驻注入
@@ -212,6 +213,9 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   aiSideDedup: true,
   // 待办自动结案默认开：一次性待办完成后必须消失，否则会一直注入「尚未验证」误导后续对话。
   aiSideTaskAutoClose: true,
+  // v1.2.9：只做「批内」去重挡不住改写（实测 45 对同义句相似度最高仅 0.487），
+  // 必须把库里已有约束一起给模型看，才可能认出「换了个说法的同一件事」。
+  contextDedup: true,
   aiSideTaskTtlHours: 72,
   // 注入预算：pinned 常驻 + 按重要性挑选，避免记忆变多后盖不全
   injectPinnedAlways: true,
@@ -1548,6 +1552,17 @@ export function resolveCharacterId(evt: any): { id: string; name: string } {
   return { id: "", name: "" };
 }
 
+/** 判定一个显示名是不是「弱名字」：空、纯数字、单字符、或明显是会话编号。
+ *  群里第一条消息的标题常常就是 "1" 这种，不能拿它盖掉已经记好的名字。 */
+export function isWeakCharacterName(name: string): boolean {
+  const s = String(name || "").trim();
+  if (!s) return true;
+  if (s.length < 2) return true;
+  if (/^[\d\s._\-]+$/.test(s)) return true;
+  if (/^(未命名角色|未知角色|undefined|null|NaN)$/i.test(s)) return true;
+  return false;
+}
+
 /** 维护角色注册表：记录出现过的角色，便于 UI 分组与历史记忆补名 */
 export function touchCharacterRegistry(settings: MemorySettings, id: string, name: string): boolean {
   if (!id) return false;
@@ -1556,7 +1571,10 @@ export function touchCharacterRegistry(settings: MemorySettings, id: string, nam
   const hit = settings.characterRegistry.find((c) => c.id === id);
   if (hit) {
     let changed = false;
-    if (name && hit.name !== name) { hit.name = name; changed = true; }
+    // v1.2.9：只有新名字更「实」时才覆盖。否则 "1" 这类群标题会把好名字冲掉。
+    const incomingWeak = isWeakCharacterName(name);
+    const currentWeak = isWeakCharacterName(hit.name);
+    if (name && hit.name !== name && (!incomingWeak || currentWeak)) { hit.name = name; changed = true; }
     if (now - hit.lastSeenAt > 60000) { hit.lastSeenAt = now; changed = true; }
     return changed;
   }
