@@ -1,0 +1,55 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 环境信息
+        run: |
+          node -v
+          echo "测试文件数: $(ls test_*.js | wc -l)"
+
+      - name: 运行全部测试
+        run: |
+          set -o pipefail
+          pass=0; fail=0; failed=
+          for f in test_*.js; do
+            if node "$f"; then
+              pass=$((pass+1))
+              echo "::notice::$f 通过"
+            else
+              fail=$((fail+1)); failed="$failed $f"
+              echo "::error::$f 失败"
+            fi
+          done
+          echo "### 测试结果：$pass 通过 / $fail 失败" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$fail" -ne 0 ]; then
+            echo "失败用例:$failed"
+            exit 1
+          fi
+
+      - name: 语法校验
+        run: |
+          for f in dist/*.js; do
+            node --check "$f"
+          done
+          echo "dist 语法校验通过"
