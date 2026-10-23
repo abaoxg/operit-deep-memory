@@ -3,12 +3,14 @@
  * 纯文字面板：纯白背景，只有文字与必要的文字输入/按钮，无图标、无装饰。
  */
 
-import type { ComposeDslContext, ComposeNode } from "../../../types/compose-dsl";
-import type { ToolPkg } from "../../../types/toolpkg";
+import type { ComposeDslContext, ComposeNode } from "../../types/compose-dsl";
+/* ToolPkg 由宿主注入（见 src/globals.d.ts 的 declare const ToolPkg）。
+   原来这里写 import type { ToolPkg } 却把它当值用，strict 下报 TS1361。 */
 
 const INK = "#000000";
 const INK_SOFT = "#444444";
 const INK_FAINT = "#888888";
+const WARN = "#C0392B";   // 配额告警用，接近/达到上限时标红
 const LINE = "#EDEDED";
 
 const TYPE_LABEL: Record<string, string> = {
@@ -36,6 +38,9 @@ interface UiMemory {
   chatId?: string;
   characterId?: string;
   characterName?: string;
+  speaker?: string;
+  speakerId?: string;
+  scope?: string;
 }
 
 function typeLabel(type: string): string {
@@ -91,7 +96,13 @@ async function dmIpc(channel: string, payload?: Record<string, unknown>): Promis
 
 function memoryText(ctx: ComposeDslContext, m: UiMemory): ComposeNode {
   const tags = (m.tags || []).slice(0, 4).join(" #");
-  const first = `${typeLabel(m.type)} · ${stars(m.importance)}${m.pinned ? " · 置顶" : ""}${m.imagePath ? " · 🖼️图片" : ""}${m.chatId ? " · 单独记忆" : ""}${m.characterId ? ` · 角色:${m.characterName || m.characterId}` : ""}`;
+  /* v1.2.8：群聊记忆要能看出「谁说的」，否则同群多角色记忆无法区分 */
+  const scopeTag = m.scope === "global"
+    ? " · 🌐全局"
+    : (m.scope === "group" ? ` · 👥群:${m.characterName || m.characterId || "?"}` : "");
+  const who = m.speaker ? ` · 说:${m.speaker === "user" ? "我" : m.speaker}` : "";
+  const roleTag = m.scope === "character" && m.characterId ? ` · 角色:${m.characterName || m.characterId}` : "";
+  const first = `${typeLabel(m.type)} · ${stars(m.importance)}${m.pinned ? " · 置顶" : ""}${m.imagePath ? " · 🖼️图片" : ""}${m.chatId ? " · 单独记忆" : ""}${scopeTag}${roleTag}${who}`;
   const second = (m.updatedAtText || "") + (tags ? "  #" + tags : "");
   return ctx.UI.Column({ spacing: 2 }, [
     ctx.UI.Text({ text: (m.imagePath ? "🖼️ " : "") + m.content, style: "bodyMedium", color: INK, maxLines: 4 }),
@@ -104,8 +115,9 @@ function memoryText(ctx: ComposeDslContext, m: UiMemory): ComposeNode {
 
 /* ---------------- 页面：全部为纯文字 ---------------- */
 
-function dashboardText(ctx: ComposeDslContext, stats: any): ComposeNode {
+function dashboardText(ctx: ComposeDslContext, stats: any, aiSt?: any): ComposeNode {
   const s = stats || {};
+  const a = aiSt || {};
   const dist = (s.typeDist || []).filter((d: any) => d.count > 0)
     .map((d: any) => `${typeLabel(d.type)} ${d.count}`).join("，") || "无";
   const tags = (s.tagCloud || []).slice(0, 8)
@@ -114,8 +126,40 @@ function dashboardText(ctx: ComposeDslContext, stats: any): ComposeNode {
     ctx.UI.Text({ text: "深度记忆", style: "headlineSmall", fontWeight: "bold", color: INK }),
     ctx.UI.Text({ text: `共 ${s.total || 0} 条记忆，今日新增 ${s.todayAdded || 0}，本周新增 ${s.weekAdded || 0}，待复习 ${s.dueReview || 0}。平均健康度 ${s.avgHealth || 0}/100，累计访问 ${s.totalAccess || 0} 次，置顶 ${s.pinned || 0} 条。`, style: "bodyMedium", color: INK_SOFT }),
     ctx.UI.Text({ text: `类型分布：${dist}`, style: "bodyMedium", color: INK }),
-    ctx.UI.Text({ text: tags ? `热门标签：${tags}` : "还没有标签，写入记忆后自动提取。", style: "bodySmall", color: INK_SOFT })
+    ctx.UI.Text({ text: tags ? `热门标签：${tags}` : "还没有标签，写入记忆后自动提取。", style: "bodySmall", color: INK_SOFT }),
+    divider(ctx),
+    ctx.UI.Text({ text: "AI 侧记忆提取", style: "titleSmall", fontWeight: "bold", color: INK }),
+    ctx.UI.Text({ text: aiSideLine(a), style: "bodySmall", color: INK }),
+    ctx.UI.Text({ text: aiSideQuotaLine(a), style: "bodySmall", color: aiSideQuotaColor(a) }),
+    ctx.UI.Text({ text: `最近结果：${a.aiSideLastOutcome || "（尚未触发）"}`, style: "bodySmall", color: INK_SOFT, maxLines: 2 })
   ]);
+}
+/** AI 侧累计数据一行摘要 */
+function aiSideLine(a: any): string {
+  const on = a.aiSideEnabled === false ? "已关闭" : "已开启";
+  return `状态 ${on}　累计触发 ${a.aiSideTotalCalls || 0} 次，记入 ${a.aiSideTotalRemembered || 0} 条，跳过 ${a.aiSideTotalSkipped || 0} 条`;
+}
+/**
+ * 小时配额一行摘要。
+ * 单独列出「被上限拦住」的次数：它和「AI 判定无需记忆」完全不同，
+ * 混在一起会让人以为模型判断有问题，实际是该调 aiSideMaxPerHour。
+ */
+function aiSideQuotaLine(a: any): string {
+  const used = a.aiSideHourQuotaUsed || 0;
+  const cap = a.aiSideHourQuotaCap || 0;
+  const capped = a.aiSideTotalCapped || 0;
+  let s = `本小时已用 ${used}/${cap}`;
+  if (cap > 0 && used >= cap) s += "　⚠ 已达上限，本小时不再记录";
+  if (capped > 0) s += `　（累计被上限拦下 ${capped} 次）`;
+  return s;
+}
+/** 配额接近或达到上限时标红，便于一眼发现 */
+function aiSideQuotaColor(a: any): string {
+  const used = a.aiSideHourQuotaUsed || 0;
+  const cap = a.aiSideHourQuotaCap || 0;
+  if (cap > 0 && used >= cap) return WARN;
+  if (cap > 0 && used / cap >= 0.8) return WARN;
+  return INK_SOFT;
 }
 
 function searchText(ctx: ComposeDslContext, q: string, setQ: (v: string) => void, result: any, busy: boolean, onSearch: () => void): ComposeNode {
@@ -151,13 +195,16 @@ function graphText(ctx: ComposeDslContext, center: UiMemory | null, links: UiMem
   const pickable = allItems || [];
   /* P11：宿主 Text 支持 modifier.clickable（JsComposeDslBridge 的 ctx.Modifier 链式构建器），
      因此「全部记忆」可以直接渲染成可点击列表，点击后走 pickCenter() 设为中心并拉建议关联。 */
-  const itemRow = (m: UiMemory) => ctx.UI.Text({
-    text: `${typeLabel(m.type)}：${String(m.content || "").slice(0, 30)}${(m.links || []).length ? `（${m.links.length} 关联）` : ""}`,
-    style: "bodySmall",
-    color: INK,
-    maxLines: 2,
-    modifier: (ctx as any).Modifier.clickable(() => onPick(m))
-  });
+  const itemRow = (m: UiMemory) => {
+    const nLinks = (m.links || []).length;
+    return ctx.UI.Text({
+      text: `${typeLabel(m.type)}：${String(m.content || "").slice(0, 30)}${nLinks ? `（${nLinks} 关联）` : ""}`,
+      style: "bodySmall",
+      color: INK,
+      maxLines: 2,
+      modifier: (ctx as any).Modifier.clickable(() => onPick(m))
+    });
+  };
   return ctx.UI.Column({ spacing: 6 }, [
     ctx.UI.Text({ text: "记忆图谱", style: "titleMedium", fontWeight: "bold", color: INK }),
     ...(center
@@ -248,10 +295,18 @@ function settingsText(ctx: ComposeDslContext, s: any, setS: (patch: Record<strin
     divider(ctx),
     toggleRow("对话自动记忆（记住/我叫/我喜欢/生日/截止）", "autoExtract"),
     toggleRow("★ AI 智能判定该不该记（推荐开）", "aiExtract"),
+    toggleRow("★ 记录 AI 自己的行动与待办（不只记你说的话）", "aiSideExtract"),
+    toggleRow("★ AI 记忆语义去重（同一件事只留一条）", "aiSideDedup"),
+    toggleRow("★ AI 待办自动结案（已完成自动移除）", "aiSideTaskAutoClose"),
+    numberRow("AI 待办未结案过期小时数", "aiSideTaskTtlHours"),
+    numberRow("AI 侧记忆最短字数", "aiSideMinLen"),
+    numberRow("AI 侧每小时最多触发次数", "aiSideMaxPerHour"),
+    numberRow("AI 侧单次最多记几条", "aiSideMaxItems"),
     toggleRow("AI 返回 JSON 时启用思考(更准但更慢)", "aiExtractThinking"),
     numberRow("AI 判定最短触发字数", "aiExtractMinLen"),
     numberRow("AI 每小时最多调用次数", "aiExtractMaxPerHour"),
     numberRow("AI 单条消息最多记几条", "aiExtractMaxItems"),
+    numberRow("AI 单次调用超时(毫秒, 默认45000)", "aiExtractTimeoutMs"),
     toggleRow("快捷遗忘（忘了关于X的事）", "quickForget"),
     toggleRow("记忆冲突检测", "conflictCheck"),
     toggleRow("到期任务提醒", "dueRemind"),
@@ -370,8 +425,19 @@ function characterText(
   const rows: ComposeNode[] = [];
   chars.forEach((c) => {
     const id = String(c.id || "");
+    /* v1.2.9：0 条必须能自解释，否则用户只会看到「1 · 0 条」不知道为什么。
+       0 条有三种正常原因：① 刚登记还没对话过 ② 该角色的旧记忆被清理成了全局
+       ③ 群会话尚未产生用户侧记忆。直接把原因写在名字旁边，省得去猜。 */
+    const isGroup = id.indexOf("group:") === 0;
+    const zeroHint = c.count === 0
+      ? (isGroup ? "（此群还没有产生角色私域记忆，群里的对话目前按全局记录）"
+                 : "（该角色还没有自己的记忆；聊天后会自动登记）")
+      : "";
     rows.push(ctx.UI.Column({ spacing: 4 }, [
       ctx.UI.Text({ text: `${c.name || id} · ${c.count} 条`, style: "bodyMedium", color: INK, maxLines: 1 }),
+      zeroHint
+        ? ctx.UI.Text({ text: zeroHint, style: "labelSmall", color: INK_FAINT, maxLines: 2 })
+        : ctx.UI.Text({ text: "", style: "labelSmall", color: "#00000000" }),
       ctx.UI.Text({ text: `id: ${id}`, style: "labelSmall", color: INK_FAINT, maxLines: 1 }),
       ctx.UI.Row({ spacing: 6 }, [
         ctx.UI.Button({ text: "预览", weight: 1, contentPadding: { horizontal: 2, vertical: 4 }, onClick: () => onPreview(id) }),
@@ -441,6 +507,7 @@ let __dmBooted = false;
 function screen(ctx: ComposeDslContext): ComposeNode {
   const [tab, setTab] = ctx.useState<string>("dm_tab", "总览");
   const [stats, setStats] = ctx.useState<any>("dm_stats", null);
+  const [aiSt, setAiSt] = ctx.useState<any>("dm_ai_state", null);
   const [allItems, setAllItems] = ctx.useState<any[]>("dm_all_items", []);
   const [q, setQ] = ctx.useState<string>("dm_q", "");
   const [searchResult, setSearchResult] = ctx.useState<any>("dm_search_result", null);
@@ -506,6 +573,8 @@ function screen(ctx: ComposeDslContext): ComposeNode {
     try {
       const s = await callIpc("memory.stats");
       if (s) { setStats(s); ok++; }
+      const a = await callIpc("memory.ai_status");
+      if (a) { setAiSt(a); ok++; }
       const all = await callIpc("memory.get_all", { limit: 200 });
       if (all && Array.isArray(all.items)) { setAllItems(all.items); ok++; }
       const r = await callIpc("memory.review", { limit: 30 });
@@ -622,7 +691,7 @@ function screen(ctx: ComposeDslContext): ComposeNode {
         return settingsText(ctx, settings, (patch: Record<string, unknown>) => setSettings({ ...(settings || {}), ...patch }), saveSettings);
       case "总览":
       default:
-        return dashboardText(ctx, stats);
+        return dashboardText(ctx, stats, aiSt);
     }
   }
 

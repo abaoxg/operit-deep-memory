@@ -12,7 +12,7 @@
 const path = require("path");
 const fs = require("fs");
 
-const WORK = "/sdcard/dm_work2";
+const WORK = path.resolve(__dirname);
 const corePath = path.join(WORK, "dist/memory-core.js");
 const coreSrc = fs.readFileSync(corePath, "utf8");
 const TARGET = "exports.DATA_DIR = `/sdcard/Download/Operit/plugins/${exports.PLUGIN_ID}`";

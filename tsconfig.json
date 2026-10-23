@@ -20,13 +20,13 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "typeRoots": [
-      "../types"
+      "./types"
     ]
   },
   "include": [
     "./**/*.ts",
     "./**/*.d.ts",
-    "../types/**/*.d.ts"
+    "./types/**/*.d.ts"
   ],
   "exclude": [
     "node_modules"

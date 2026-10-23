@@ -610,12 +610,30 @@
                     "required": true
                 }
             ]
+        },
+        {
+            "name": "dm_retag",
+            "description": {
+                "zh": "重建全库索引：按当前策略重算标签（只收可辨识标识，且需被>=2条记忆共享）并重建记忆关联（同角色+同空间+共享标签>=1，最多3条，双向）。幂等可反复执行；只改 tags/links，不动正文与时间戳。批量导入、标签膨胀或 links 长期为 0 时用它收敛。",
+                "en": "Rebuild the whole index: recompute tags (identifiers only, kept if shared by >=2 memories) and rebuild links (same character + same space + >=1 shared tag, max 3, bidirectional). Idempotent; only touches tags/links."
+            },
+            "parameters": [
+                {
+                    "name": "dryRun",
+                    "description": {
+                        "zh": "true=只统计不落盘（可选）",
+                        "en": "true = dry run, stats only (optional)"
+                    },
+                    "type": "boolean",
+                    "required": false
+                }
+            ]
         }
     ]
 }
 */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ipcAutoExtract = exports.ipcCharacterPreview = exports.ipcCharacterForget = exports.ipcCharacterMigrate = exports.ipcCharacterAssign = exports.ipcCharacterRegister = exports.ipcCharacterList = exports.ipcConflicts = exports.ipcReport = exports.ipcInjectionPreview = exports.ipcReviewForUi = exports.ipcStatsForUi = exports.ipcRecallForUi = exports.ipcSuggestLinks = exports.ipcSettingsSet = exports.ipcSettingsGet = exports.ipcReviewDone = exports.ipcSetPinned = exports.ipcUpdateImportance = exports.ipcDelete = exports.ipcGetAll = exports.dm_import_bundle = exports.dm_export_bundle = exports.dm_import = exports.dm_export = exports.dm_conflicts = exports.dm_extract = exports.dm_report = exports.dm_options = exports.dm_stats = exports.dm_review = exports.dm_unlink = exports.dm_link = exports.dm_update = exports.dm_forget = exports.dm_recall = exports.dm_remember = void 0;
+exports.dm_retag = exports.ipcAutoExtract = exports.ipcCharacterPreview = exports.ipcCharacterForget = exports.ipcCharacterMigrate = exports.ipcCharacterAssign = exports.ipcCharacterRegister = exports.ipcCharacterList = exports.ipcConflicts = exports.ipcReport = exports.ipcInjectionPreview = exports.ipcReviewForUi = exports.ipcStatsForUi = exports.ipcRecallForUi = exports.ipcSuggestLinks = exports.ipcSettingsSet = exports.ipcSettingsGet = exports.ipcReviewDone = exports.ipcSetPinned = exports.ipcUpdateImportance = exports.ipcDelete = exports.ipcGetAll = exports.dm_import_bundle = exports.dm_export_bundle = exports.dm_import = exports.dm_export = exports.dm_conflicts = exports.dm_extract = exports.dm_report = exports.dm_options = exports.dm_stats = exports.dm_review = exports.dm_unlink = exports.dm_link = exports.dm_update = exports.dm_forget = exports.dm_recall = exports.dm_remember = void 0;
 const memory_core_1 = require("../memory-core");
 function wrapResult(ok, message, data) {
     return { success: ok, message, data };
@@ -646,6 +664,11 @@ function publicItem(m) {
         chatId: m.chatId || "",
         characterId: m.characterId || "",
         characterName: m.characterName || "",
+        /* v1.2.8：scope 与 speaker 必须透出，否则 UI 无法区分「谁在哪个场景说的」 */
+        /* 老数据盘上没有 scope 字段，必须用 scopeOf 推断，否则面板一律显示「无归属」 */
+        scope: m.scope || (0, memory_core_1.scopeOf)(m),
+        speaker: m.speaker || "",
+        speakerId: m.speakerId || "",
         imagePath: m.imagePath ? `/sdcard/Download/Operit/plugins/${memory_core_1.PLUGIN_ID}/${m.imagePath}` : "",
         expiryAt: m.expiryAt || null
     };
@@ -802,8 +825,9 @@ async function dm_update(params) {
     const changed = [];
     if (typeof p.content === "string" && p.content.trim()) {
         item.content = p.content.trim();
+        // v1.2.6：编辑内容后同样走复用过滤，否则改一次内容就又长出一堆碎片标签
         if (settings.autoTag !== false)
-            item.tags = (0, memory_core_1.extractTags)(item.content, item.tags);
+            item.tags = (0, memory_core_1.pruneTagsByReuse)(store, (0, memory_core_1.extractTags)(item.content, item.tags), item.content);
         changed.push("内容");
     }
     if (typeof p.importance === "number") {
@@ -1281,3 +1305,28 @@ async function ipcAutoExtract(text, chatId) {
     return wrapResult(true, `已自动记忆：${typeInfo.emoji} ${typeInfo.labelZh}「${result.item.content.slice(0, 60)}」${result.item.sensitive ? "（已加密）" : ""}${result.item.chatId ? "（单独记忆·仅本对话框）" : "（通用记忆）"}${result.conflicts.length ? " ⚠️ 发现冲突：" + result.conflicts.length + " 处" : ""}`, publicItem(result.item));
 }
 exports.ipcAutoExtract = ipcAutoExtract;
+/* ---------------- dm_retag：全库标签重算 ---------------- */
+async function dm_retag(params) {
+    const store = await (0, memory_core_1.loadStore)();
+    const settings = await (0, memory_core_1.loadSettings)();
+    const beforeTagged = store.items.filter((m) => (m.tags || []).length > 0).length;
+    const beforeInst = store.items.reduce((a, m) => a + (m.tags || []).length, 0);
+    const beforeUniq = new Set();
+    store.items.forEach((m) => (m.tags || []).forEach((x) => beforeUniq.add(x)));
+    const beforeLinks = store.items.reduce((a, m) => a + (m.links || []).length, 0);
+    const stat = (0, memory_core_1.retagAll)(store);
+    const linkStat = (0, memory_core_1.relinkAll)(store, settings);
+    if (params && params.dryRun === true) {
+        return wrapResult(true, `[试算] 标签 ${beforeTagged}→${stat.tagged} 条有标签，唯一值 ${beforeUniq.size}→${stat.unique}；关联 ${beforeLinks}→${linkStat.edges} 条边（未落盘）`, {
+            dryRun: true,
+            before: { tagged: beforeTagged, instances: beforeInst, unique: beforeUniq.size, links: beforeLinks },
+            after: stat, links: linkStat
+        });
+    }
+    await (0, memory_core_1.saveStore)(store);
+    return wrapResult(true, `索引已重建：标签 ${beforeTagged}→${stat.tagged} 条有标签，唯一值 ${beforeUniq.size}→${stat.unique}（移除碎片 ${stat.removed} 个）；关联 ${beforeLinks}→${linkStat.edges} 条边，${linkStat.linked} 条记忆有关联`, {
+        before: { tagged: beforeTagged, instances: beforeInst, unique: beforeUniq.size, links: beforeLinks },
+        after: stat, links: linkStat, settings: { autoTag: settings.autoTag, autoLink: settings.autoLink }
+    });
+}
+exports.dm_retag = dm_retag;

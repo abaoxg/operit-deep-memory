@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.deep_memory",
-  "version": "1.2.0",
+  "version": "1.2.9",
   "api_version": "1.0.1",
   "main": "dist/main.js",
   "display_name": {
@@ -9,8 +9,8 @@
     "en": "Deep Memory"
   },
   "description": {
-    "zh": "六边形长期记忆插件 · v1.2.0 角色主线版：AI 语义判定 + 角色记忆隔离（每个角色只看到自己的记忆与全局记忆，互不串味），支持类型/重要性/敏感/空间/角色自动判定、冲突检测、艾宾浩斯复习、注入预算优化与液态玻璃管理面板。零外部依赖，无需 API Key。",
-    "en": "Hexagon long-term memory plugin v1.2.0 with character lanes: AI decides what is worth remembering, and each character only sees its own memories plus global ones. Auto type/importance/sensitive/space/character tagging, conflict detection, Ebbinghaus review, injection budget tuning and a liquid-glass panel. No external API key required."
+    "zh": "六边形长期记忆插件 · v1.2.9 配额语义修正版：AI 侧每小时配额改为只统计「真正写进库的记忆条数」，不再按调用尝试次数计费 —— 规则能拦下的操作流水不再消耗额度，避免连续工具输出几分钟就刷满额度、导致之后整小时用户的话一条也记不进来。用户侧记身份/偏好/事件/关系，AI 侧只提取关于用户与事件的事实，不记自身的工程流水。支持群聊记忆归属（scope=global/character/group + speaker，用户本人在群里说的话跨场景可见、群成员的话只在该群可见）、角色记忆隔离、类型与重要性自动判定、冲突检测、艾宾浩斯复习、注入预算优化，以及坏库隔离与备份回退的数据安全保护。零外部依赖，无需 API Key。",
+    "en": "Hexagonal long-term memory plugin, v1.2.9 (quota semantics fix). The AI-side hourly quota now counts only memories actually written, not extraction attempts, so on-rule-rejected tool logs no longer burn the budget and block the user's real statements for the rest of the hour. User side stores identity/preferences/events/relations; the AI side only extracts facts about the user and events. Group chat ownership (scope=global/character/group plus speaker) keeps user statements visible across scenes while group members stay scoped to that group. Includes character isolation, auto type/importance, conflict detection, Ebbinghaus review, injection budgeting, and corrupt-store isolation with backup fallback. Zero deps, no API key."
   },
   "enabled_by_default": true,
   "subpackages": [

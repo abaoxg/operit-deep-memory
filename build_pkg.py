@@ -15,10 +15,11 @@ import re
 import sys
 import zipfile
 
-WORK = "/sdcard/dm_work2"
-OUT_DIR = "/sdcard/dm_out"
+WORK = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(os.path.dirname(WORK), "dm_out")
 PKG_ID = "com.operit.deep_memory"
-VERSION = "1.2.0"
+# 版本号单一事实来源：manifest.json。脚本不再写死，避免升号后两处不一致。
+VERSION = json.loads(io.open(os.path.join(WORK, "manifest.json"), encoding="utf-8").read())["version"]
 
 NAV_SURFACE_WHITELIST = {
     "toolbox", "TOOLBOX",
@@ -45,6 +46,14 @@ FILES = [
     "test_integration.js",
     "test_e2e.js",
     "test_character.js",
+    "test_ai_side_extract.js",
+    "test_ai_side_quality.js",
+    "test_tag_link.js",
+    "test_hook_timeout.js",
+        "test_ai_cap.js",
+    "test_group_scope.js",
+    "test_meta_filter.js",
+    "test_ai_quota_semantics.js",
 ]
 
 
@@ -134,6 +143,20 @@ def check_hook_exports():
     print("  [OK] 钩子函数导出完整（检查 %d 处）" % checked)
 
 
+def check_pkg_name():
+    """产物文件名必须 = <manifest.toolpkg_id>-v<version>.toolpkg
+
+    历史坑：产物叫 com-operit-deep-memory-v1.2.3.toolpkg（连字符），而包内 id 是
+    com.operit.deep_memory。宿主安装列表里因此出现「看着像同一个插件的两个东西」，
+    旧文件的残留缓存也认不出来——监督官把它记为 AUDIT-005「id 改名/包噪音」。
+    """
+    stem = "%s-v%s" % (PKG_ID, VERSION)
+    if not re.match(r"^[a-z0-9_]+(\.[a-z0-9_]+)+$", PKG_ID):
+        die("PKG_ID=%r 不是合法的点号分隔标识" % PKG_ID)
+    print("  [OK] 产物名 %s.toolpkg 与 toolpkg_id 一致" % stem)
+    return stem
+
+
 def build():
     # 校验文件齐全
     missing = []
@@ -147,7 +170,9 @@ def build():
     if not os.path.isdir(OUT_DIR):
         os.makedirs(OUT_DIR)
 
-    out = os.path.join(OUT_DIR, "com-operit-deep-memory-v%s.toolpkg" % VERSION)
+    # 包名必须与 manifest.toolpkg_id 一致（点号分隔），否则宿主按文件名推导出的标识
+    # 与包内 id 不同，安装/去重会产生两条条目或残留旧缓存（AUDIT-005）。
+    out = os.path.join(OUT_DIR, "%s-v%s.toolpkg" % (PKG_ID, VERSION))
     if os.path.exists(out):
         os.remove(out)
         print("  [--] 已删除同名旧包")
@@ -188,7 +213,9 @@ def main():
     check_nav_surface()
     print("=== 3. 校验钩子函数导出 ===")
     check_hook_exports()
-    print("=== 4. 打包 ===")
+    print("=== 4. 校验产物命名 ===")
+    check_pkg_name()
+    print("=== 5. 打包 ===")
     out = build()
     print()
     print("完成: %s" % out)

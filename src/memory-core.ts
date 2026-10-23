@@ -36,7 +36,7 @@ export interface MemoryItem {
   content: string;
   tags: string[];
   importance: number;      // 1-5
-  source: string;          // chat / user / ai / manual / ui / import / auto
+  source: string;          // chat / user / ai / ai-action / manual / ui / import / auto
   createdAt: number;
   updatedAt: number;
   lastAccessAt: number;
@@ -55,6 +55,27 @@ export interface MemoryItem {
    */
   characterId?: string;
   characterName?: string;  // 角色显示名快照（便于 UI 展示与角色删除后溯源）
+  /**
+   * 发言人（v1.2.8 群聊改造）。
+   * - "user"      = 用户本人说的话
+   * - 其他字符串  = 群成员的显示名（如 "张三"）
+   * - undefined   = 未知发言人（老数据，无归属）
+   *
+   * 为什么必须单独存：群聊里"我喜欢美式"脱离了发言人就是垃圾数据——
+   * 张三的偏好和李四的偏好会被混成同一个人。characterId 表达的是
+   * "这条记忆带给谁看"，speaker 表达的是"这句话是谁说的"，两者正交。
+   */
+  speaker?: string;
+  speakerId?: string;      // 发言人稳定 id（成员 id，改名不失联）
+  /**
+   * 归属作用域（v1.2.8）。显式记录本条记忆的可见性边界，
+   * 不再靠 characterId 是否带 "group:" 前缀去反推。
+   * - "global"    = 全局（用户本人画像，任何场景可见）
+   * - "character" = 某角色私域
+   * - "group"     = 某群共享（仅该群可见）
+   * 缺省时由 characterId 推断，保证老数据行为不变。
+   */
+  scope?: string;
   sensitive?: boolean;     // 敏感内容加密存储
   imagePath?: string;      // 关联图片（记忆目录内相对路径 images/<id>.ext），空=无图
   expiryAt?: number;       // 可选过期时间
@@ -104,6 +125,16 @@ export interface MemorySettings {
   aiExtractMinLen: number;         // 触发 AI 判定的最短消息长度
   aiExtractMaxPerHour: number;     // 每小时最多调用次数
   aiExtractMaxItems: number;       // 单条消息最多提取条数
+  aiExtractTimeoutMs: number;      // 单次模型调用超时（毫秒）；宿主侧无超时保护，插件必须自己兜底
+  /* ---- AI 侧记忆（v1.2.4 新增）：不只记用户说的话，也记 AI 自己做了什么、要做什么 ---- */
+  aiSideExtract: boolean;          // 记录 AI 侧的行动/待办/结论（开关）
+  aiSideMinLen: number;            // AI 回复触发抽取的最短长度（AI 回复通常很长，门槛可略高）
+  aiSideMaxPerHour: number;        // AI 侧每小时最多调用次数（与用户侧独立计数）
+  aiSideMaxItems: number;          // AI 侧单条回复最多提取条数
+  /* ---- v1.2.5：AI 侧记忆质量（去重 + 待办结案）---- */
+  aiSideDedup: boolean;            // AI 侧写入前做语义去重，避免同一件事反复记
+  aiSideTaskAutoClose: boolean;    // AI 侧待办自动结案（完成即删除，不留僵尸待办）
+  aiSideTaskTtlHours: number;      // 未结案待办的保留小时数，超时自动过期
   /* 注入预算 */
   injectPinnedAlways: boolean;     // 置顶记忆常驻注入
   injectBudgetChars: number;       // 注入字符预算
@@ -111,6 +142,8 @@ export interface MemorySettings {
   characterIsolation: boolean;     // 启用角色隔离：按当前角色过滤注入与检索
   injectGlobalMemory: boolean;     // 注入全局记忆（characterId 为空的，任何角色都可见）
   injectCharacterMemory: boolean;  // 注入当前角色的私域记忆
+  injectGroupMemory: boolean;      // v1.2.8：注入当前群的共享记忆（仅在该群内）
+  promoteGroupUserMemory: boolean; // v1.2.8：群聊里「用户本人」说的话升格为全局可见
   characterAutoTag: boolean;       // 自动写入时把当前角色记到 characterId 上
   characterFallbackGlobal: boolean;// 拿不到角色 id 时降级为全局可见（true）还是什么都不注入（false）
   characterRegistry: CharacterEntry[]; // 角色注册表（id → 显示名，用于 UI 与历史记忆补名）
@@ -165,6 +198,21 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   aiExtractMinLen: 6,
   aiExtractMaxPerHour: 60,
   aiExtractMaxItems: 3,
+  // 宿主对 hook 返回的 Promise 没有超时保护（dex 里 timeoutSec 可为 null），
+  // 一旦模型不返回，消息管线会被永久挂住。这里给单次调用设硬上限。
+  aiExtractTimeoutMs: 45000,
+  // ---- AI 侧记忆（v1.2.4 新增）----
+  // 默认开启：只记用户说的话会导致「只记住你是谁，没记住我们做到哪」。
+  aiSideExtract: true,
+  aiSideMinLen: 24,
+  aiSideMaxPerHour: 20,
+  aiSideMaxItems: 3,
+  // ---- v1.2.5：AI 侧记忆质量 ----
+  // 去重默认开：实测不加会 10 分钟写 30 条近重复过程叙述。
+  aiSideDedup: true,
+  // 待办自动结案默认开：一次性待办完成后必须消失，否则会一直注入「尚未验证」误导后续对话。
+  aiSideTaskAutoClose: true,
+  aiSideTaskTtlHours: 72,
   // 注入预算：pinned 常驻 + 按重要性挑选，避免记忆变多后盖不全
   injectPinnedAlways: true,
   injectBudgetChars: 1600,
@@ -172,6 +220,8 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   characterIsolation: true,        // 默认开启：不同角色不串记忆
   injectGlobalMemory: true,        // 全局记忆照常注入（你的偏好/习惯对所有角色通用）
   injectCharacterMemory: true,     // 角色私域记忆也注入
+  injectGroupMemory: true,         // v1.2.8：群共享记忆在本群内注入
+  promoteGroupUserMemory: true,    // v1.2.8：群里用户本人的自述升格为全局（用户画像不该被群边界切断）
   characterAutoTag: true,          // 自动提取时记录当前角色
   characterFallbackGlobal: true,   // 拿不到角色（普通对话）→ 按全局处理
   characterRegistry: []
@@ -491,48 +541,205 @@ const STOP_CHARS = new Set([
 ]);
 
 /** 从文本提取候选标签：hashtag、英文词、中文双字+片段 */
+/* v1.2.6 标签治理
+ *
+ * 实测结论：按「自然语言分词」打标签必然失败。库里 75 个标签有 66 个只出现过一次，
+ * 等于没打标签，还白占注入预算。根因是「每条记忆内容不同 → 抽出的词天然不同 →
+ * 标签天然不可复用」，换分词算法救不回来（试过 4 种，唯一值反而从 75 涨到 220）。
+ *
+ * 现在的策略：
+ *   1. 标签只收「可辨识标识」——文件名、驼峰键、带分隔符标识符、版本号。
+ *      中文短语一律不进标签：它本质是内容切片，复用率为 0。
+ *   2. 写入时用 pruneTagsByReuse 过滤：候选标签必须在库里已经出现过（含本条则 ≥2 次），
+ *      否则丢弃。这样标签天然是「复用型索引」而不是「专属碎片」。
+ *   3. 单条上限 5 个，宁缺勿滥；全部被过滤掉就留空数组，允许没有标签。
+ */
+const TAG_TOKEN = /[A-Za-z0-9][A-Za-z0-9_]*(?:[.:-][A-Za-z0-9_]+)*/g;
+const TAG_COMMON = new Set([
+  "的", "了", "是", "在", "和",
+  "the", "and", "for", "with", "that", "this", "from", "have", "will", "but", "not",
+  "you", "all", "can", "are", "was", "were", "has", "had", "its", "our", "out", "one",
+  "get", "set", "use", "used", "must", "more", "than", "then", "them", "there", "these",
+  "those", "what", "when", "which", "who", "why", "how", "does", "doing", "done", "make",
+  "made", "need", "needs", "only", "also", "just", "even", "still", "very", "into", "over",
+  "after", "before", "because", "would", "could", "should", "may", "might", "much", "many",
+  "some", "any", "each", "every", "both", "other", "another", "same", "diff", "new", "old",
+  "yes", "off", "now", "run", "ran", "try", "tried", "add", "added", "fix", "fixed", "see",
+  "seen", "say", "said", "way", "here", "where", "about", "above", "below", "again", "once",
+  "always", "never", "often", "less", "most", "own", "per", "pre", "sub", "non", "via", "yet",
+  "etc", "like", "want", "wants", "know", "think", "take", "give", "keep", "let", "put",
+  "true", "false", "null", "none", "void", "type", "name", "value", "data", "item", "list",
+  "map", "obj", "func", "var", "const", "async", "await", "return", "import", "export",
+  "class", "public", "private", "static", "string", "number", "boolean", "array", "object",
+  "error", "warn", "info", "debug", "test", "tests", "main", "index", "file", "files", "path",
+  "text", "code", "json", "http", "https", "html", "css", "api", "url", "uri", "key", "keys",
+  "log", "logs", "line", "lines", "node", "dist", "src", "lib", "bin", "tmp", "temp", "user",
+  "users", "root", "home", "admin", "system", "tool", "tools", "pkg", "cmd", "exec", "shell",
+  "bash", "python", "npm", "git", "commit", "branch", "call", "read", "write", "start", "stop",
+  /* 记忆自身的结构字段与类型名：它们出现在几乎所有正文里，共享度高但没有区分力 */
+  "fact", "idea", "event", "relation", "preference", "task", "content", "content", "source",
+  "memory", "memories", "plugin", "plugins", "package", "packages", "file", "files",
+  /* 纯英文字母碎片：长度小于 6 的裸英文词通常是动词/介词残留 */
+  "done", "soon", "next", "last", "first", "second", "third", "week", "month", "year", "time",
+  "times", "case", "cases", "point", "level", "stage", "step", "steps", "part", "parts"
+]);
+function normTag(raw: string): string {
+  let v = String(raw || "").toLowerCase();
+  v = v.replace(/^[._:+-]+|[._:+-]+$/g, "");
+  v = v.replace(/[._-]?\d{10,}$/, "");
+  return v;
+}
+/**
+ * 抽取候选标签（未经复用过滤）。
+ *
+ * 职责划分（v1.2.6 重构）：
+ *   - 这里只管「宽」：把所有 ASCII 标识类 token 都交出来，不做语义判断；
+ *   - 收敛交给 pruneTagsByReuse：没被别的记忆用过的，一律丢弃。
+ *
+ * 为什么不收中文：中文切片本质是正文碎片，实测 88% 只出现一次，
+ * 且切词器会产出「需要确认一下内容」这类句子碎片。换四种切分方案
+ * 唯一值反从 75 涨到 220，证明这条路不通。中文正文本身已在注入里可见，
+ * 且 scoreRelevance 用 qTokens 对正文加分，不靠中文标签检索。
+ */
 export function extractTags(content: string, existing: string[] = []): string[] {
   const text = String(content || "");
   const out = new Set<string>();
-  const push = (w: string) => {
-    const t = w.trim().toLowerCase();
-    if (!t || t.length < 2 || t.length > 20) return;
-    if (STOP_WORDS.has(t)) return;
-    if (/^[0-9\s.,!?;:'"()\[\]{}]+$/.test(t)) return;
-    out.add(t);
+  const add = (raw: string) => {
+    const v = normTag(raw);
+    if (v.length < 4 || v.length > 40) return;
+    const letters = v.replace(/[^a-z]/g, "").length;
+    if (letters === 0) return;             // 纯数字/纯符号不做标签
+    /* 版本号（v1.2.5）与短标识（2.4g）是有效标识，只要带数字就放行；
+       纯字母裸词则要求 >= 4 个字母，挡掉 com/api/key/doc 这类三级短词。 */
+    const hasDigit = /[0-9]/.test(v);
+    if (!hasDigit && letters < 4) return;
+    if (TAG_COMMON.has(v)) return;
+    out.add(v);
   };
-
-  // hashtag
-  const tags = text.match(/#([\u4e00-\u9fa5a-zA-Z0-9_]{2,20})/g) || [];
-  tags.forEach((h) => push(h.replace("#", "")));
-
-  // 英文单词
-  const words = text.match(/[a-zA-Z][a-zA-Z0-9_-]{2,24}/g) || [];
-  words.forEach((w) => push(w));
-
-  // 中文：按虚词切分成短语，只保留 2-8 字的名词性短语
-  // （原实现按 2 字窗口暴力切分，会产出“庭路”“由器”“行脚”这类无意义碎片标签）
-  const CN_SPLIT = /[的了是和与及或但而并也都就个吧吗呢啊这那我你他她它们把被让从向于之为因每第更最又再]+/;
-  const cnChunks = text.match(/[\u4e00-\u9fa5]{2,20}/g) || [];
-  cnChunks.forEach((chunk) => {
-    chunk.split(CN_SPLIT).forEach((p) => {
-      if (p.length >= 2 && p.length <= 8) push(p);
-    });
+  (text.match(TAG_TOKEN) || []).forEach(add);
+  (existing || []).forEach((e) => {
+    const v = normTag(e);
+    if (v && v.length >= 2) out.add(v);
   });
-
-  // 数字（年份/金额/年龄等）
-  const nums = text.match(/(\d{2,4})/g) || [];
-  nums.forEach((n) => {
-    if (n.length >= 3) push(n);
-  });
-
-  // 与现有标签合并（去重），限制数量
-  existing.forEach((e) => out.add(String(e).trim().toLowerCase()));
-  const arr = Array.from(out);
-  return arr.slice(0, 30);
+  /* 常量更多候选（12），让 prune 在其中挑出最多 5 个可复用的；
+     若在这里就截断到 5，前面不可复用的候选会把后面可用的挤死。 */
+  return Array.from(out).slice(0, 12);
 }
-
-/** 标签共享数（用于关联建议） */
+/**
+ * 复用过滤：只保留「库里已经有另一条记忆也带这个标识」的标签。
+ * 这样标签总量受词表收敛约束，不会随记忆条数线性膨胀。
+ */
+/* 标识频次缓存：key = 条数|updatedAt，命中即复用，避免每次写入都全库重算 */
+let _tagFreqCache: { key: string; map: Map<string, number> } | null = null;
+/**
+ * 统计每个标识在多少条记忆里出现过（按候选集口径，不是子串匹配）。
+ * 用候选集口径的原因：子串匹配会把 com 命中 command、key 命中 keynote，
+ * 频次虚高，等于把「谁都沾一点的词」当成索引。
+ */
+export function tagFreqMap(store: MemoryStore): Map<string, number> {
+  const items = (store && store.items) || [];
+  const key = items.length + '|' + (store && store.updatedAt ? store.updatedAt : 0);
+  if (_tagFreqCache && _tagFreqCache.key === key) return _tagFreqCache.map;
+  const map = new Map<string, number>();
+  for (const m of items) {
+    /* 只吃正文候选集，不吃 m.tags：否则标签会自我强化（写进去→频次+1→留下）
+       → 重算结果随上一轮结果漂移，永远不收敛。标签必须是正文的纯函数。 */
+    const set = new Set<string>(extractTags(String(m.content || ""), []));
+    set.forEach((tg) => { if (tg) map.set(tg, (map.get(tg) || 0) + 1); });
+  }
+  _tagFreqCache = { key, map };
+  return map;
+}
+/**
+ * 复用过滤：只保留「被 >= 2 条记忆共享」的标识。
+ *
+ * 为什么必须共享：标签的价值在于把多条记忆连成网。一条记忆独占的标识
+ * 既找不到同伴、也建不出关联，还白占注入预算——实测库里 88% 的标签是这种碎片。
+ *
+ * 为什么用全库频次而不是「别人提过没有」：后者看的是写入瞬间的库状态，
+ * 同一个标识先写后写结论不同，结果随写入顺序漂移，且无法对存量库重算收敛。
+ * 全库频次只依赖各条记忆正文，与顺序无关，因此幂等、可反复重算。
+ */
+export function pruneTagsByReuse(store: MemoryStore, tags: string[], selfContent?: string): string[] {
+  const cand = (tags || []).map(normTag).filter((x) => x.length >= 2);
+  if (cand.length === 0) return [];
+  const freq = tagFreqMap(store);
+  const keep: string[] = [];
+  for (const tg of cand) {
+    /* 若本条已在 store 里，它已计入 freq；若还没有（写入前调用），freq 里没有本条，
+       此时只要「已有 >= 1 条别的记忆带它」就说明将来会成为共享标签，故门槛取 1。 */
+    const inStore = store.items.some((m) => String(m.content || "") === String(selfContent || ""));
+    const n = (freq.get(tg) || 0) + (inStore ? 0 : 1);
+    if (n >= 2) {
+      keep.push(tg);
+      if (keep.length >= 5) break;
+    }
+  }
+  return keep;
+}
+/**
+ * 存量建链：按当前 autoLink 规则给全库重建关联。
+ *
+ * 之前的 autoLink 只在 remember() 里跑，存量记忆永远等不到建链机会——
+ * 实测 65 条记忆、按规则本该有 117 条边，实际 links 全为 0。
+ *
+ * 规则与 remember 内保持一致：同角色 + 同空间 + 共享标签 >= 1，最多 3 条，双向。
+ * 幂等：已存在的边不重复加；每次从零重算，避免旧边越积越多。
+ */
+export function relinkAll(store: MemoryStore, settings: MemorySettings): { linked: number; edges: number; pruned: number } {
+  const before = store.items.reduce((a, m) => a + (m.links || []).length, 0);
+  /* 先清空，再按规则重建，保证幂等且能把失效边一并清掉 */
+  store.items.forEach((m) => { m.links = []; });
+  const byId = new Map<string, MemoryItem>();
+  store.items.forEach((m) => byId.set(m.id, m));
+  for (const item of store.items) {
+    const mine = new Set((item.tags || []).map((x) => String(x).toLowerCase()));
+    if (mine.size === 0) continue;
+    const linkable = store.items
+      .filter((m) => m.id !== item.id)
+      .filter((m) => String(m.characterId || "") === String(item.characterId || ""))
+      .filter((m) => (m.space || "general") === (item.space || "general"))
+      .map((m) => {
+        const shared = (m.tags || []).filter((x) => mine.has(String(x).toLowerCase())).length;
+        return { m, shared };
+      })
+      .filter((x) => x.shared >= 1)
+      .sort((a, b) => b.shared - a.shared)
+      .slice(0, 3);
+    linkable.forEach((x) => {
+      if (item.links.indexOf(x.m.id) < 0) item.links.push(x.m.id);
+      if (x.m.links.indexOf(item.id) < 0) x.m.links.push(item.id);
+    });
+  }
+  store.items.forEach((m) => { m.links = m.links.slice(0, MAX_LINKS_PER_MEMORY); });
+  const after = store.items.reduce((a, m) => a + (m.links || []).length, 0);
+  const linked = store.items.filter((m) => (m.links || []).length > 0).length;
+  return { linked, edges: after, pruned: Math.max(0, before - after) };
+}
+/**
+ * 存量重算：按当前策略把全库标签重算一遍。
+ * 只改 tags，不动正文/链接/时间戳；幂等，可重复执行。
+ */
+export function retagAll(store: MemoryStore): { changed: number; tagged: number; unique: number; removed: number } {
+  const freq = tagFreqMap(store);
+  let changed = 0, tagged = 0, removed = 0;
+  const uniq = new Set<string>();
+  for (const m of store.items) {
+    let cand = extractTags(String(m.content || ""), []).map(normTag);
+    cand = cand.filter((tg) => (freq.get(tg) || 0) >= 2).slice(0, 5);
+    const before = (m.tags || []).map(normTag).join(",");
+    const after = cand.join(",");
+    const oldLen = (m.tags || []).length;
+    if (before !== after) {
+      m.tags = cand;
+      changed++;
+      if (cand.length < oldLen) removed += oldLen - cand.length;
+    }
+    if (cand.length) { tagged++; cand.forEach((tg) => uniq.add(tg)); }
+  }
+  _tagFreqCache = null;
+  return { changed, tagged, unique: uniq.size, removed };
+}
 function tagShared(a: string[], b: string[]): number {
   if (!a.length || !b.length) return 0;
   const setA = new Set(a.map((t) => t.toLowerCase()));
@@ -677,9 +884,16 @@ export function normalizeItem(raw: Record<string, any>): MemoryItem | null {
     links: Array.isArray(raw.links) ? raw.links.map((l: any) => String(l)).slice(0, MAX_LINKS_PER_MEMORY) : [],
     space: typeof raw.space === "string" && raw.space ? raw.space : "general"
   };
-  if (typeof raw.chatId === "string" && raw.chatId) item.chatId = raw.chatId;
+  /* v1.2.8：新字段必须反序列化回来，否则每次 loadStore 都会丢发言人 */
+  if (typeof raw.speaker === "string" && raw.speaker) item.speaker = raw.speaker;
+  if (typeof raw.speakerId === "string" && raw.speakerId) item.speakerId = raw.speakerId;
+  /* 先还原 characterId，再推断 scope —— 顺序反了会把老群数据全判成 global */
   if (typeof raw.characterId === "string" && raw.characterId) item.characterId = raw.characterId;
   if (typeof raw.characterName === "string" && raw.characterName) item.characterName = raw.characterName;
+  if (typeof raw.scope === "string" && raw.scope) item.scope = raw.scope;
+  else if (item.characterId) item.scope = String(item.characterId).indexOf("group:") === 0 ? "group" : "character";
+  else item.scope = "global";
+  if (typeof raw.chatId === "string" && raw.chatId) item.chatId = raw.chatId;
   if (typeof raw.imagePath === "string" && raw.imagePath) item.imagePath = raw.imagePath;
   if (typeof raw.expiryAt === "number") item.expiryAt = raw.expiryAt;
   if (raw.pinned === true) item.pinned = true;
@@ -768,11 +982,48 @@ export async function loadStore(): Promise<MemoryStore> {
     const res = await Tools.Files.exists(MEMORY_FILE);
     if (!res.exists) return emptyStore();
     const data = await Tools.Files.read(MEMORY_FILE);
+    const raw = data.content || "";
     let parsed: unknown = null;
     try {
-      parsed = JSON.parse(data.content || "{}");
+      parsed = JSON.parse(raw);
     } catch (e) {
-      parsed = null;
+      /* v1.2.8 数据安全：解析失败绝不能静默返回空库。
+         原实现会返回 emptyStore()，随后任意一次 saveStore 就把整库覆盖成空，
+         这在「写入非原子 + 并发读写」时是真实可复现的丢库路径。 */
+      const r2 = await Tools.Files.read(MEMORY_FILE);
+      try {
+        parsed = JSON.parse((r2 && r2.content) || "");
+      } catch (e2) {
+        parsed = null;
+      }
+      if (parsed === null) {
+        /* 最后一道防线：从 backup/ 找最新一份能解析的顶上 */
+        try {
+          const backupDir = DATA_DIR + "/backup";
+          const listRes = (await Tools.Files.list(backupDir)) as any;
+          const files = (listRes && listRes.entries ? listRes.entries : [])
+            .filter((en: any) => !en.isDirectory && String(en.name || "").endsWith(".json"))
+            .map((en: any) => String(en.name))
+            .sort()
+            .reverse();
+          for (const nm of files.slice(0, 5)) {
+            try {
+              const bd = await Tools.Files.read(backupDir + "/" + nm);
+              const bparsed = JSON.parse((bd && bd.content) || "");
+              if (bparsed && Array.isArray((bparsed as any).items)) {
+                parsed = bparsed;
+                console.log("[dm] 主库损坏，已回退备份 " + nm);
+                break;
+              }
+            } catch (eb) { /* 试下一份 */ }
+          }
+        } catch (el) { /* ignore */ }
+      }
+      if (parsed === null) {
+        const brokenPath = MEMORY_FILE + ".broken_" + Date.now();
+        try { await Tools.Files.write(brokenPath, raw, false); } catch (e3) { /* ignore */ }
+        throw new Error("记忆库解析失败，已隔离原文到 " + brokenPath);
+      }
     }
     const store = normalizeStore(parsed);
     try {
@@ -783,6 +1034,10 @@ export async function loadStore(): Promise<MemoryStore> {
     }
     return store;
   } catch (e) {
+    /* v1.2.8：外层 catch 不能把「坏库」错误吞掉。
+       否则内层辛苦抛出的异常会在这里被抹平，仍旧静默返回空库。 */
+    const msg = String((e && (e as any).message) || "");
+    if (msg.indexOf("记忆库解析失败") >= 0) throw e;
     return emptyStore();
   }
 }
@@ -812,7 +1067,21 @@ export async function saveStore(store: MemoryStore): Promise<void> {
   }
   const clone: MemoryStore = JSON.parse(JSON.stringify(store));
   encryptStoreItems(clone, key);
-  await Tools.Files.write(MEMORY_FILE, JSON.stringify(clone), false);
+  /* v1.2.8 写入健壮性：
+     宿主 Files 只有 read/write/copy/deleteFile/list，没有 move/rename，
+     做不了真正的 rename 原子替换。改为三步：
+       ① 先写 .tmp 完整副本（此时主文件仍完好）
+       ② 再覆盖主文件
+       ③ 万一主文件解析失败，loadStore 会回退到 backup/ 最新可解析副本
+     实测过并发读写会读到半截 JSON；这套能保证「读到半截」不演变成「丢库」。 */
+  const tmpFile = MEMORY_FILE + ".tmp";
+  const payload = JSON.stringify(clone);
+  try {
+    await Tools.Files.write(tmpFile, payload, false);
+  } catch (e) {
+    /* .tmp 写失败不阻断主写入 */
+  }
+  await Tools.Files.write(MEMORY_FILE, payload, false);
 }
 
 export async function loadSettings(): Promise<MemorySettings> {
@@ -849,6 +1118,9 @@ export interface RememberInput {
   chatId?: string;         // 单独记忆：仅该对话框可见；空=通用记忆
   characterId?: string;    // 角色归属：空=全局记忆（所有角色可见）
   characterName?: string;  // 角色名快照
+  speaker?: string;        // 发言人（v1.2.8）：user / 群成员名
+  speakerId?: string;      // 发言人稳定 id
+  scope?: string;          // 归属作用域：global / character / group
   imagePath?: string;      // 本地图片路径（复制进记忆库）
   mergeSimilar?: boolean; // 相似内容去重合并
 }
@@ -868,6 +1140,132 @@ function similarity(a: string, b: string): number {
   return hit / Math.min(ta.length, tb.length);
 }
 
+/**
+ * v1.2.5 AI 侧语义去重。
+ *
+ * 为什么不能用词面相似度：AI 侧写的是过程叙述，
+ * 「已核实缓存指纹 fb46435a」和「确认四个文件已写入且指纹一致」字面差别很大、
+ * 语义完全重复，token 重合度抓不住这种冗余，只会越记越臃肿。
+ *
+ * 真正能区分「有没有新增信息」的是**可辨识错点**：文件名、路径、哈希、版本号、
+ * 带分隔符的标识符、驼峰设置键。它们才是记忆的载荷；
+ * 中文描述只是包装，同一件事换个说法，错点集合不变。
+ *
+ * 判定规则（用 30 条真实 AI 侧记忆逐对校准过）：
+ *   候选的特征集合被某条同类型旧记忆**完全包含**，且候选自身错点 >= 3 个
+ *   -> 候选没有任何新增信息 -> 视为重复，不必再写一条。
+ * 只要候选多出哪怕一个错点（新文件、新值、新路径）就照常写入，绝不误杀。
+ */
+const FEATURE_PATTERNS = [
+  /[A-Za-z0-9_-]+\.[A-Za-z]{2,6}(?![A-Za-z0-9])/g,
+  /[0-9a-f]{8,}/g,
+  /v\d+\.\d+(?:\.\d+)?/g,
+  /[a-z]+[A-Z][A-Za-z0-9]{2,}/g,
+  /[A-Za-z][A-Za-z0-9]*(?:[._:-][A-Za-z0-9]+)+/g
+];
+/** 抽出可辨识错点。时间戳后缀要归一化，否则同一条记忆换个时间就变成「新信息」 */
+export function featureAnchors(text: string): string[] {
+  const s = String(text || "");
+  const out = new Set<string>();
+  FEATURE_PATTERNS.forEach((re) => {
+    const found = s.match(re) || [];
+    found.forEach((raw) => {
+      let a = raw.replace(/[_-]?\d{10,}/g, "").toLowerCase();
+      a = a.replace(/^[/_.-]+|[/_.-]+$/g, "");
+      if (a.length >= 3) out.add(a);
+    });
+  });
+  return Array.from(out);
+}
+/**
+ * 判断候选记忆是否只是旧记忆的复述。
+ * 只与同 type 同角色的条目比对 —— 一个 task 和一个 fact 说同一件事不算重复。
+ */
+export function findRedundant(
+  store: MemoryStore,
+  content: string,
+  opts: { type?: string; characterId?: string; threshold?: number; minFeatures?: number } = {}
+): { item: MemoryItem; score: number } | null {
+  const threshold = typeof opts.threshold === "number" ? opts.threshold : 0.85;
+  const minFeatures = typeof opts.minFeatures === "number" ? opts.minFeatures : 3;
+  const cand = featureAnchors(content);
+  // 错点太少的条目（比如「任务已清理」）没有可比对的骨架，一律放行，宁多记不误删
+  if (cand.length < minFeatures) return null;
+  const candSet = new Set(cand);
+  const targetType = opts.type ? normalizeType(opts.type) : "";
+  const targetChar = String(opts.characterId || "");
+  let best: { item: MemoryItem; score: number } | null = null;
+  for (const old of store.items) {
+    if (String(old.characterId || "") !== targetChar) continue;
+    if (targetType && normalizeType(old.type) !== targetType) continue;
+    const oldFeat = featureAnchors(old.content);
+    if (oldFeat.length < minFeatures) continue;
+    const oldSet = new Set(oldFeat);
+    let hit = 0;
+    oldFeat.forEach((t) => { if (candSet.has(t)) hit++; });
+    const score = hit / Math.min(cand.length, oldFeat.length);
+    if (score < threshold) continue;
+    // 关键闸门：候选若有旧记忆没有的错点，就是新增信息，不能判重复
+    const newInCand = cand.filter((t) => !oldSet.has(t));
+    if (newInCand.length > 0) continue;
+    if (!best || score > best.score) best = { item: old, score };
+  }
+  return best;
+}
+
+/**
+ * v1.2.5 待办结案：把「已完成」的 AI 侧一次性待办从库里清掉。
+ *
+ * 为什么必须有这一步：v1.2.4 写的 task 型记忆没有闭环，
+ * 「待验证 xxx」这类一次性待办在事情做完后仍永久留在库中，
+ * 还会被注入到后续对话，反复告诉模型「这件事还没做完」，属于主动误导。
+ *
+ * 结案规则（保守，宁可留错也不误删）：
+ *   1. 只处理 source=ai-action 且 type=task 的条目 —— 用户侧的待办绝不代用户处理。
+ *   2. 命中 doneKeywords（已完成/已验证/通过/已修复…）且不含 pendingKeywords（待/未/尚未…）
+ *      → 判定已完成 → 直接删除。
+ *   3. 未结案的按 aiSideTaskTtlHours 过期：超过时限的待办自动标记过期，
+ *      由既有的 expiryAt 清理机制收走，不再无限累积。
+ * 返回 { closed, expired }，调用方负责 saveStore。
+ */
+const DONE_KEYWORDS = ["已完成", "已通过", "验证通过", "已修复", "已解决", "已完成并", "已确认", "成功", "跑通"];
+const PENDING_KEYWORDS = ["待", "未", "尚未", "还需", "需要", "下一步", "下次", "尚未确认", "未完成"];
+export function closeAiSideTasks(
+  store: MemoryStore,
+  settings: any
+): { closed: MemoryItem[]; expired: MemoryItem[] } {
+  const closed: MemoryItem[] = [];
+  const expired: MemoryItem[] = [];
+  if (settings.aiSideTaskAutoClose === false) return { closed, expired };
+  const now = Date.now();
+  const ttlHours = Math.max(1, Number(settings.aiSideTaskTtlHours) || 72);
+  const keep: MemoryItem[] = [];
+  for (const m of store.items) {
+    const isAiTask = m.source === "ai-action" && normalizeType(m.type) === "task";
+    if (!isAiTask) { keep.push(m); continue; }
+    const c = String(m.content || "");
+    const hasDone = DONE_KEYWORDS.some((k) => c.indexOf(k) >= 0);
+    const hasPending = PENDING_KEYWORDS.some((k) => c.indexOf(k) >= 0);
+    // 同时含「已完成」和「待」的，多半是「待验证是否已完成」这类真待办，不能删
+    if (hasDone && !hasPending) {
+      closed.push(m);
+      continue;
+    }
+    // 超时未结案：打上过期时间交给 expiryAt 清理，避免永久占用注入预算
+    if (typeof m.expiryAt !== "number") {
+      const age = now - (m.createdAt || now);
+      if (age > ttlHours * 3600000) {
+        m.expiryAt = now;
+        m.updatedAt = now;
+        expired.push(m);
+      }
+    }
+    keep.push(m);
+  }
+  store.items = keep;
+  return { closed, expired };
+}
+
 /** 写入一条记忆（自动标签 / 去重合并 / 关联 / 空间 / 敏感加密） */
 export async function remember(store: MemoryStore, input: RememberInput, settings: MemorySettings): Promise<{ item: MemoryItem; merged: boolean; related: MemoryItem[]; conflicts: ConflictInfo[] }> {
   const content = String(input.content || "").trim();
@@ -881,12 +1279,16 @@ export async function remember(store: MemoryStore, input: RememberInput, setting
   }
 
   // 去重合并：内容高度相似时更新旧记忆（有冲突时不合并，保留旧记忆供确认）
-  // 角色隔离：只在同一角色域内合并 —— 否则角色A的话会被并进角色B的记忆，隔离从根上失效
+  // 作用域隔离：只在同一作用域内合并 —— 否则角色A的话会被并进角色B的记忆，隔离从根上失效
+  // v1.2.8：光比 characterId 不够。群里张三和李四可能说同一句「我喜欢咖啡」，
+  //   若合并，发言人会被覆盖成后说的那个 —— 发言人本身就是要记的信息，必须一并比对。
   let merged = false;
   if (input.mergeSimilar !== false && conflicts.length === 0) {
     const targetChar = String(input.characterId || "");
+    const targetSpeaker = String(input.speaker || "");
     for (const old of store.items) {
-      if (String(old.characterId || "") !== targetChar) continue;   // 跨角色绝不合并
+      if (String(old.characterId || "") !== targetChar) continue;   // 跨作用域绝不合并
+      if (String(old.speaker || "") !== targetSpeaker) continue;    // 不同发言人绝不合并
       if (old.space === space && similarity(old.content, content) >= 0.6) {
         old.content = content;
         old.updatedAt = now;
@@ -903,9 +1305,11 @@ export async function remember(store: MemoryStore, input: RememberInput, setting
     }
   }
 
-  const tags = settings.autoTag
+  // v1.2.6：autoTag 现在等于「生成候选 + 复用过滤」，不再直接信任分词结果
+  const rawTags = settings.autoTag
     ? extractTags(content, input.tags || [])
     : (input.tags || []).map((t) => String(t).toLowerCase()).slice(0, 30);
+  const tags = settings.autoTag ? pruneTagsByReuse(store, rawTags, content) : rawTags;
 
   const item: MemoryItem = {
     id: genId(),
@@ -924,8 +1328,23 @@ export async function remember(store: MemoryStore, input: RememberInput, setting
     links: (input.linkIds || []).slice(0, MAX_LINKS_PER_MEMORY),
     space
   };
+  /* v1.2.8：发言人必须跟着记忆一起落盘，否则群聊记忆是无主句 */
+  if (input.speaker) item.speaker = String(input.speaker).slice(0, 40);
+  if (input.speakerId) item.speakerId = String(input.speakerId).slice(0, 80);
+  /* scope 显式化：老调用方不传时按 characterId 反推，行为与升级前一致 */
+  item.scope = input.scope
+    ? String(input.scope)
+    : (input.characterId ? (String(input.characterId).indexOf("group:") === 0 ? "group" : "character") : "global");
   if (typeof input.chatId === "string" && input.chatId) item.chatId = input.chatId;
-  if (typeof input.characterId === "string" && input.characterId) {
+  /* v1.2.9：scope=global 时不允许再挂 characterId。
+     之前会出现「scope=global 但 characterId=group:xxx」这种脏组合：
+     可见性判断按 global 走（正确），但「角色」页统计却把它算进该角色名下，
+     于是用户看到「某个群 0 条」却查不出这 0 条是怎么来的 —— 数据本身是自相矛盾的。
+     现在落盘即规整：全局记忆一律不归属任何角色。 */
+  if (item.scope === "global") {
+    delete (item as any).characterId;
+    delete (item as any).characterName;
+  } else if (typeof input.characterId === "string" && input.characterId) {
     item.characterId = input.characterId;
     if (typeof input.characterName === "string" && input.characterName) item.characterName = input.characterName;
   }
@@ -943,6 +1362,32 @@ export async function remember(store: MemoryStore, input: RememberInput, setting
     store.items = store.items.slice(0, MAX_MEMORIES);
   }
 
+  // v1.2.6：autoLink 真正建链（之前它只生成建议、从不落盘，导致 links 恒为 0）
+  // 建链条件保守：同角色 + 同空间 + 共享标签 >= 2，最多 3 条，宁少勿滥
+  if (settings.autoLink !== false) {
+    // 实测同一主题的两条记忆往往只共享 1 个标签（如 toolpkg），2 个的门槛会永远不建链。
+    // 改为共享 1 个即建链，但靠下面的互斥条件防滥连：只取分数最高的 3 条，且必须同角色同空间。
+    const mine = new Set(item.tags.map((x) => String(x).toLowerCase()));
+    const linkable = store.items
+      .filter((m) => m.id !== item.id)
+      .filter((m) => String(m.characterId || "") === String(item.characterId || ""))
+      .filter((m) => m.space === item.space)
+      .map((m) => {
+        const shared = (m.tags || []).filter((x) => mine.has(String(x).toLowerCase())).length;
+        return { m, shared };
+      })
+      .filter((x) => x.shared >= 1)
+      .sort((a, b) => b.shared - a.shared)
+      .slice(0, 3);
+    linkable.forEach((x) => {
+      if (item.links.length >= MAX_LINKS_PER_MEMORY) return;
+      if (item.links.indexOf(x.m.id) < 0) item.links.push(x.m.id);
+      if (x.m.links.indexOf(item.id) < 0) {
+        x.m.links.push(item.id);
+        x.m.links = x.m.links.slice(0, MAX_LINKS_PER_MEMORY);
+      }
+    });
+  }
   // 反向关联：把关联写入目标记忆
   item.links.forEach((lid) => {
     const target = findById(store, lid);
@@ -983,33 +1428,123 @@ export function findRelated(store: MemoryStore, item: MemoryItem, settings: Memo
  *
  * 关键设计：所有路径共用这一个函数，杜绝"存的时候隔离了、查的时候漏了"。
  */
+/**
+ * v1.2.8：算出本条记忆的归属作用域。
+ * 优先用显式 scope 字段；老数据没有该字段，按 characterId 前缀推断，
+ * 保证升级后老库行为与升级前完全一致。
+ */
+export function scopeOf(item: MemoryItem): string {
+  const s = String(item.scope || "");
+  if (s === "global" || s === "character" || s === "group") return s;
+  const cid = String(item.characterId || "");
+  if (!cid) return "global";
+  return cid.indexOf("group:") === 0 ? "group" : "character";
+}
+
 export function isVisibleToCharacter(item: MemoryItem, characterId: string | undefined, settings: MemorySettings): boolean {
   if (!settings.characterIsolation) return true;
   const cur = String(characterId || "");
   const owner = String(item.characterId || "");
+  /* v1.2.8：先判 scope。用户在群里说的话被定成 global，但事件里仍带着 group:xxx 的
+     characterId（归属字段没清）。若只按「owner 为空」判全局，这类记忆会被当成群私域，
+     导致「用户本人在群里说的话」在单聊/他群完全不可见 —— 与设计意图正好相反。 */
+  if (scopeOf(item) === "global") return settings.injectGlobalMemory !== false;
   if (!owner) return settings.injectGlobalMemory !== false;
   if (!cur) return false;                       // 无角色身份：看不到任何角色私域记忆
+  /* v1.2.8 群聊语义：group:xxx 是群共享池。
+     只有当"当前作用域"就是这个群时才可见——群记忆不能漏到别的群/单聊。
+     这与升级前行为一致（owner !== cur 即 false），但语义显式化了。 */
+  if (scopeOf(item) === "group") return owner === cur && settings.injectGroupMemory !== false;
   if (owner !== cur) return false;              // 别的角色：一律不可见
   return settings.injectCharacterMemory !== false;
 }
 
-/** 从会话上下文里解析当前角色（宿主 event 结构层层兜底，任何一层命中即用） */
-export function resolveCharacterId(evt: any): { id: string; name: string } {
+/**
+ * v1.2.8 新增：判定「这条记忆要不要注入给当前作用域」。
+ *
+ * 与 isVisibleToCharacter 的分工：
+ *   isVisibleToCharacter 只答「角色边界允不允许」
+ *   isInjectable        再叠加「跨场景升格」规则
+ *
+ * 跨场景升格（解决用户画像断裂）：
+ *   用户在群 A 说的「我是做网络运维的」，speaker=user。
+ *   这条属于用户本人，不是群 A 的私有知识。
+ *   因此 speaker=user 的群记忆，对任何作用域都可注入。
+ *   而 speaker=张三 的群记忆只在群 A 内可见，绝不外流。
+ *
+ * 这样：用户画像全局随身带，群成员的隐私留在群里。
+ */
+export function isInjectable(item: MemoryItem, scopeId: string | undefined, settings: MemorySettings): boolean {
+  if (isVisibleToCharacter(item, scopeId, settings)) return true;
+  if (!settings.characterIsolation) return true;
+  const sc = scopeOf(item);
+  if (sc !== "group") return false;
+  /* 群记忆升格条件（两条必须同时成立）：
+     1. 发言人是用户本人（speaker=user），不是群成员
+     2. 开关允许（默认开，可关） */
+  const sp = String(item.speaker || "");
+  if (sp !== "user") return false;
+  if (settings.promoteGroupUserMemory === false) return false;
+  return settings.injectGlobalMemory !== false;
+}
+/**
+ * 严格解析：只认宿主真实下发的 activePrompt，绝不拿 roleName 猜。
+ *
+ * 字段候选面依据宿主 dex 证据拓宽（均零成本，命中即用）：
+ *   - id 候选：id / cardId / characterCardId / characterId / promptId
+ *   - 类型候选：type / promptType（dex 中 ActivePrompt 侧两者并存）
+ *   - 名称候选：name / displayName / title / cardName / characterName
+ *
+ * 运行时实测（宿主 1.12.2，composeSystemPrompt / promptFinalize 双通道）：
+ *   event.eventPayload.metadata.activePrompt = { type, id, name }
+ *   type 实测取值：character_group（群聊）。宿主 dex 中的合法常量有
+ *   character_card / character_group（classes12 各 35 处、classes8 各 20 处）。
+ *
+ * 关键教训：v1.2.0 首版白名单只放行 character_card/character/persona，
+ * 导致群聊（character_group）被误杀、resolved 恒为空——白名单必须包含
+ * 宿主的全部角色类 prompt 类型，否则等于没解析。
+ */
+export function resolvePromptScope(evt: any): { id: string; name: string; type: string } {
   const paths: any[] = [
-    evt && evt.metadata && evt.metadata.activePrompt,
+    // 实测命中路径：两条钩子的 activePrompt 都在 eventPayload.metadata 下
     evt && evt.eventPayload && evt.eventPayload.metadata && evt.eventPayload.metadata.activePrompt,
+    evt && evt.metadata && evt.metadata.activePrompt,
     evt && evt.eventPayload && evt.eventPayload.activePrompt,
     evt && evt.activePrompt,
   ];
   for (const p of paths) {
     if (!p || typeof p !== "object") continue;
-    const type = String(p.type || "").toLowerCase();
-    const id = p.id || p.cardId || p.characterId;
+    const type = String(p.type || p.promptType || "").toLowerCase();
+    const id = p.id || p.cardId || p.characterCardId || p.characterId || p.promptId;
     if (!id) continue;
-    // 只认角色卡类型；其它 prompt 类型（如普通 system）不算角色
-    if (type && type !== "character_card" && type !== "character" && type !== "persona") continue;
-    return { id: String(id), name: String(p.name || p.displayName || p.title || "") };
+    // 只排除明确非角色的类型；未知类型放行（宁可多认也不要漏）。
+    if (type === "system" || type === "tool" || type === "none") continue;
+    const name = p.name || p.displayName || p.title || p.cardName || p.characterName || "";
+    // 群聊作用域：宿主下发的是"群 id"，不是角色卡 id，必须加前缀区分域，
+    // 否则同名 uuid 在群聊与单聊之间会串味。
+    const scopeId = type === "character_group" ? "group:" + String(id) : String(id);
+    return { id: scopeId, name: String(name), type: type };
   }
+  return { id: "", name: "", type: "" };
+}
+
+/**
+ * 兼容层：解析当前角色。优先真实 activePrompt；拿不到才退回 roleName 虚拟 id。
+ *
+ * 注意：roleName 兜底只用于"冷启动首次"这类实在没有上下文的情况。一旦
+ * 注入钩子把真实 id 缓存下来，调用方应优先用缓存（见 currentCharacterId），
+ * 否则会出现"注入用 group:x、落库用 role:<角色名>"的同一角色双 id 撕裂，
+ * 记忆永远注入不回来。
+ */
+export function resolveCharacterId(evt: any): { id: string; name: string } {
+  const strict = resolvePromptScope(evt);
+  if (strict.id) return { id: strict.id, name: strict.name };
+  // 最后兜底：chatmsg / msgproc 通道没有 metadata，只有 roleName。
+  // 用 "role:<名字>" 作为稳定虚拟 id，保证群聊场景下的角色隔离不至于完全空转。
+  // 注意：改名会导致 id 变化，因此只在拿不到真实 cardId 时使用。
+  const payload = (evt && evt.eventPayload) || evt || {};
+  const roleName = String(payload.roleName || payload.characterName || "").trim();
+  if (roleName) return { id: "role:" + roleName, name: roleName };
   return { id: "", name: "" };
 }
 
@@ -1057,7 +1592,7 @@ export async function recall(store: MemoryStore, q: RecallQuery, settings: Memor
   let filtered = store.items.filter((m) => {
     if (space && m.space !== space) return false;
     // 角色主流隔离：唯一判定入口（characterId 缺省=全局可见）
-    if (!q.allCharacters && !isVisibleToCharacter(m, q.characterId, settings)) return false;
+    if (!q.allCharacters && !isInjectable(m, q.characterId, settings)) return false;
     // 对话归属过滤：默认仅通用记忆；传 chatId 则含该对话单独记忆；allChats 含全部
     if (q.allChats !== true) {
       if (q.chatId) {
@@ -1263,7 +1798,9 @@ export function injectionCacheHash(store: MemoryStore, settings: MemorySettings,
     String(settings.reviewEnabled),
     String(settings.characterIsolation),
     String(settings.injectGlobalMemory),
-    String(settings.injectCharacterMemory)
+    String(settings.injectCharacterMemory),
+    String(settings.injectGroupMemory),
+    String(settings.promoteGroupUserMemory)
   ];
   return parts.join("|");
 }
@@ -1276,7 +1813,8 @@ export function buildInjection(store: MemoryStore, settings: MemorySettings, max
   //   对话：通用记忆（chatId 为空，全局共享）∪ 单独记忆（chatId == 当前对话框）
   const curChar = String(characterId || "");
   const scopeItems = store.items.filter((m) => {
-    if (!isVisibleToCharacter(m, curChar, settings)) return false;
+    /* v1.2.8：改用 isInjectable，它会额外把「群里用户本人的自述」升格为全局 */
+    if (!isInjectable(m, curChar, settings)) return false;
     return (
       (settings.injectGeneral !== false && !m.chatId) ||
       (settings.injectSpace !== false && chatId && m.chatId === chatId)

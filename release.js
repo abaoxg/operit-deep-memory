@@ -2,7 +2,7 @@
 /**
  * 发布到 GitHub Release
  *   用法：GH_TOKEN=xxx node release.js [包路径] [发布说明文件]
- *   不传包路径时自动取 manifest.json 的 version，到 /sdcard/dm_out 找对应 .toolpkg
+ *   不传包路径时自动取 manifest.json 的 version，到 path.resolve(__dirname, "..", "dm_out") 找对应 .toolpkg
  *
  * 行为：tag 已存在则复用它（已上传的同名资产先删再传，避免 422）；
  *       tag 不存在则新建 release。最后打印下载地址与资产字节数。
@@ -13,14 +13,14 @@ const { execSync } = require("child_process");
 
 const OWNER = "abaoxg";
 const REPO = "operit-deep-memory";
-const OUT = "/sdcard/dm_out";
+const OUT = path.resolve(__dirname, "..", "dm_out");
 const TOKEN = process.env.GH_TOKEN;
 if (!TOKEN) {
   console.error("[FATAL] 缺 GH_TOKEN");
   process.exit(1);
 }
 
-const manifest = JSON.parse(fs.readFileSync("/sdcard/dm_work2/manifest.json", "utf8"));
+const manifest = JSON.parse(fs.readFileSync("path.resolve(__dirname, "manifest.json")", "utf8"));
 const ver = manifest.version;
 
 let pkg = process.argv[2];

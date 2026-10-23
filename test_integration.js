@@ -10,7 +10,7 @@
  */
 const path = require("path");
 const fs = require("fs");
-const WORK = "/sdcard/dm_work2";
+const WORK = path.resolve(__dirname);
 const DATA = "/tmp/dm_itest";
 fs.rmSync(DATA, { recursive: true, force: true });
 fs.mkdirSync(DATA, { recursive: true });

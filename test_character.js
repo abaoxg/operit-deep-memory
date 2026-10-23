@@ -13,7 +13,7 @@
  */
 const path = require("path");
 const fs = require("fs");
-const WORK = "/sdcard/dm_work2";
+const WORK = path.resolve(__dirname);
 const corePath = path.join(WORK, "dist/memory-core.js");
 const coreSrc = fs.readFileSync(corePath, "utf8");
 const TARGET = "exports.DATA_DIR = `/sdcard/Download/Operit/plugins/${exports.PLUGIN_ID}`";
@@ -283,6 +283,30 @@ function baseSettings(patch) {
         ok("非角色类型不误判",
             core.resolveCharacterId({ metadata: { activePrompt: { type: "system", id: "W" } } }).id === "");
         ok("无 activePrompt 时返回空", core.resolveCharacterId({ eventPayload: { chatId: "c1" } }).id === "");
+        // v1.2.0 补强：chatmsg/msgproc 通道没有 activePrompt，只有 roleName
+        const rn = core.resolveCharacterId({ eventPayload: { sender: "ai", roleName: "测试角色A" } });
+        ok("无 activePrompt 时用 roleName 兜底", rn.id === "role:测试角色A" && rn.name === "测试角色A");
+        ok("roleName 为空串时不产生角色", core.resolveCharacterId({ eventPayload: { roleName: "   " } }).id === "");
+        ok("activePrompt 优先于 roleName", core.resolveCharacterId({
+            metadata: { activePrompt: { type: "character_card", id: "REAL", name: "真角色" } },
+            eventPayload: { roleName: "测试角色A" }
+        }).id === "REAL");
+
+        // v1.2.1 修复：群聊 character_group 曾被白名单误杀（真实运行时缺陷）
+        const grp = core.resolvePromptScope({
+            eventPayload: { metadata: { activePrompt: { type: "character_group", id: "fe64d9e1", name: "群1" } } }
+        });
+        ok("群聊 character_group 能解析", grp.id === "group:fe64d9e1" && grp.type === "character_group", grp);
+        ok("群聊解析出 id 后不再退回 roleName", core.resolveCharacterId({
+            eventPayload: {
+                metadata: { activePrompt: { type: "character_group", id: "fe64d9e1", name: "群1" } },
+                roleName: "某角色"
+            }
+        }).id === "group:fe64d9e1");
+        ok("unknown 类型放行（不写死白名单）",
+            core.resolvePromptScope({ eventPayload: { metadata: { activePrompt: { type: "whatever", id: "Q" } } } }).id === "Q");
+        ok("system 类型仍排除",
+            core.resolvePromptScope({ eventPayload: { metadata: { activePrompt: { type: "system", id: "S" } } } }).id === "");
     }
 
     /* ================= 7. 旧数据兼容 ================= */

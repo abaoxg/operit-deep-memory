@@ -13,7 +13,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DIR = process.argv[2] || "/sdcard/dm_work2";
+const DIR = process.argv[2] || path.resolve(__dirname);
 const MEM = "/sdcard/Download/Operit/plugins/com.operit.deep_memory/memories.json";
 
 function walk(dir, base, out) {

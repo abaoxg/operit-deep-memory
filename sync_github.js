@@ -17,7 +17,7 @@ const { execSync } = require("child_process");
 const OWNER = "abaoxg";
 const REPO = "operit-deep-memory";
 const BRANCH = "main";
-const ROOT = "/sdcard/dm_work2";
+const ROOT = path.resolve(__dirname);
 const TOKEN = process.env.GH_TOKEN;
 const API = "https://api.github.com";
 

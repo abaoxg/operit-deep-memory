@@ -609,6 +609,24 @@
                     "required": true
                 }
             ]
+        },
+        {
+            "name": "dm_retag",
+            "description": {
+                "zh": "重建全库索引：按当前策略重算标签（只收可辨识标识，且需被>=2条记忆共享）并重建记忆关联（同角色+同空间+共享标签>=1，最多3条，双向）。幂等可反复执行；只改 tags/links，不动正文与时间戳。批量导入、标签膨胀或 links 长期为 0 时用它收敛。",
+                "en": "Rebuild the whole index: recompute tags (identifiers only, kept if shared by >=2 memories) and rebuild links (same character + same space + >=1 shared tag, max 3, bidirectional). Idempotent; only touches tags/links."
+            },
+            "parameters": [
+                {
+                    "name": "dryRun",
+                    "description": {
+                        "zh": "true=只统计不落盘（可选）",
+                        "en": "true = dry run, stats only (optional)"
+                    },
+                    "type": "boolean",
+                    "required": false
+                }
+            ]
         }
     ]
 }
@@ -630,6 +648,9 @@ import {
   exportJson,
   extractMemoryIntent,
   extractTags,
+  pruneTagsByReuse,
+  relinkAll,
+  retagAll,
   findById,
   findRelated,
   formatTime,
@@ -644,6 +665,7 @@ import {
   reviewQueue,
   saveSettings,
   saveStore,
+  scopeOf,
   touchCharacterRegistry,
   type BundleExportResult,
   type BundleImportResult,
@@ -690,6 +712,11 @@ function publicItem(m: MemoryItem): Record<string, unknown> {
     chatId: m.chatId || "",
     characterId: m.characterId || "",
     characterName: m.characterName || "",
+    /* v1.2.8：scope 与 speaker 必须透出，否则 UI 无法区分「谁在哪个场景说的」 */
+    /* 老数据盘上没有 scope 字段，必须用 scopeOf 推断，否则面板一律显示「无归属」 */
+    scope: m.scope || scopeOf(m),
+    speaker: m.speaker || "",
+    speakerId: m.speakerId || "",
     imagePath: m.imagePath ? `/sdcard/Download/Operit/plugins/${PLUGIN_ID}/${m.imagePath}` : "",
     expiryAt: m.expiryAt || null
   };
@@ -891,7 +918,8 @@ export async function dm_update(params?: {
   const changed: string[] = [];
   if (typeof p.content === "string" && p.content.trim()) {
     item.content = p.content.trim();
-    if (settings.autoTag !== false) item.tags = extractTags(item.content, item.tags);
+    // v1.2.6：编辑内容后同样走复用过滤，否则改一次内容就又长出一堆碎片标签
+    if (settings.autoTag !== false) item.tags = pruneTagsByReuse(store, extractTags(item.content, item.tags), item.content);
     changed.push("内容");
   }
   if (typeof p.importance === "number") {
@@ -1370,4 +1398,31 @@ export async function ipcAutoExtract(text: string, chatId?: string): Promise<Too
     `已自动记忆：${typeInfo.emoji} ${typeInfo.labelZh}「${result.item.content.slice(0, 60)}」${result.item.sensitive ? "（已加密）" : ""}${result.item.chatId ? "（单独记忆·仅本对话框）" : "（通用记忆）"}${result.conflicts.length ? " ⚠️ 发现冲突：" + result.conflicts.length + " 处" : ""}`,
     publicItem(result.item)
   );
+}
+
+/* ---------------- dm_retag：全库标签重算 ---------------- */
+export async function dm_retag(params?: { dryRun?: boolean }): Promise<ToolResult> {
+  const store = await loadStore();
+  const settings = await loadSettings();
+  const beforeTagged = store.items.filter((m) => (m.tags || []).length > 0).length;
+  const beforeInst = store.items.reduce((a, m) => a + (m.tags || []).length, 0);
+  const beforeUniq = new Set<string>();
+  store.items.forEach((m) => (m.tags || []).forEach((x) => beforeUniq.add(x)));
+
+  const beforeLinks = store.items.reduce((a, m) => a + (m.links || []).length, 0);
+  const stat = retagAll(store);
+  const linkStat = relinkAll(store, settings);
+
+  if (params && params.dryRun === true) {
+    return wrapResult(true, `[试算] 标签 ${beforeTagged}→${stat.tagged} 条有标签，唯一值 ${beforeUniq.size}→${stat.unique}；关联 ${beforeLinks}→${linkStat.edges} 条边（未落盘）`, {
+      dryRun: true,
+      before: { tagged: beforeTagged, instances: beforeInst, unique: beforeUniq.size, links: beforeLinks },
+      after: stat, links: linkStat
+    });
+  }
+  await saveStore(store);
+  return wrapResult(true, `索引已重建：标签 ${beforeTagged}→${stat.tagged} 条有标签，唯一值 ${beforeUniq.size}→${stat.unique}（移除碎片 ${stat.removed} 个）；关联 ${beforeLinks}→${linkStat.edges} 条边，${linkStat.linked} 条记忆有关联`, {
+    before: { tagged: beforeTagged, instances: beforeInst, unique: beforeUniq.size, links: beforeLinks },
+    after: stat, links: linkStat, settings: { autoTag: settings.autoTag, autoLink: settings.autoLink }
+  });
 }
