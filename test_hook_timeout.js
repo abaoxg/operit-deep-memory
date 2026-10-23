@@ -100,7 +100,10 @@ function ok(name, cond, extra) {
     const r1 = await ai.aiExtractText("这是一条足够长的测试消息用于触发判定", undefined);
     const el1 = Date.now() - t0;
     ok("两个通道都被尝试过", chatCalls.length === 2, chatCalls);
-    ok("在总预算内返回（<= 9s）", el1 <= 9000, el1);
+    /* 断言的是「超时机制生效」，不是「计时精确」。
+       下限：两个通道各拿 3000ms，所以不可能早于 6s 返回。
+       上限：总预算 8s，允许 +2s 调度抖动（机器忙时 setTimeout 会迟到）。 */
+    ok("在总预算内返回（6s~10s）", el1 >= 5500 && el1 <= 10000, el1);
     ok("失败后不抛异常、返回结果", !!(r1 && typeof r1 === "object"), r1);
     ok("统计记录为错误", /超时|timeout/i.test(String((await ai.aiStatus()).lastError || "")), (await ai.aiStatus()).lastError);
 
@@ -130,7 +133,10 @@ function ok(name, cond, extra) {
     ]);
     const el2 = Date.now() - t0;
     ok("钩子在看门狗预算内 resolve（未被永久挂住）", raced === "resolved", { raced, el2 });
-    ok("耗时约等于预算 16s（±4s）", Math.abs(el2 - 16000) < 4000, el2);
+    /* 看门狗预算 = 3000*2 + 10000 = 16s。只验证「约在预算附近」：
+       不能明显早于 13s（那说明根本没等超时），也不能晚于 22s（那说明看门狗没生效）。
+       原来写 ±4s 太窄，机器一忙 setTimeout 迟到就随机失败。 */
+    ok("耗时在预算附近（13s~22s）", el2 >= 13000 && el2 <= 22000, el2);
 
     aiMod.aiExtractText = origExtract;
 
